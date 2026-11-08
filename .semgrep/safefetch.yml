@@ -1,0 +1,55 @@
+rules:
+  - id: safefetch-no-shell-invocation
+    languages: [rust]
+    severity: ERROR
+    message: Never run programs through a shell (sh -c / cmd /C); pass arguments directly.
+    patterns:
+      - pattern-either:
+          - pattern: Command::new("sh")
+          - pattern: Command::new("bash")
+          - pattern: Command::new("cmd")
+          - pattern: Command::new("powershell")
+          - pattern: tokio::process::Command::new("sh")
+          - pattern: std::process::Command::new("cmd")
+
+  - id: safefetch-no-secret-in-logs
+    languages: [rust]
+    severity: ERROR
+    message: The VirusTotal key must never be logged or formatted.
+    # Rust macros are opaque to Semgrep's AST matcher, so use a regex.
+    pattern-regex: '(trace|debug|info|warn|error|println|eprintln|print|format|panic|write|writeln)!\([^;]*\.expose\(\)'
+
+  - id: safefetch-no-file-upload-outside-explicit-path
+    languages: [rust]
+    severity: ERROR
+    message: Uploading files to VirusTotal is only allowed from Engine::upload_to_virustotal (explicit user action).
+    patterns:
+      - pattern: $C.upload_file(...)
+      - pattern-not-inside: |
+          pub async fn upload_to_virustotal(...) -> $R { ... }
+
+  - id: safefetch-no-automatic-redirects
+    languages: [rust]
+    severity: ERROR
+    message: HTTP clients must not follow redirects automatically (each hop is validated manually).
+    pattern: reqwest::redirect::Policy::limited(...)
+
+  - id: safefetch-no-inner-html
+    languages: [javascript]
+    severity: ERROR
+    message: Use textContent / DOM nodes; file names and threat names are attacker-controlled.
+    pattern-either:
+      - pattern: $E.innerHTML = $V
+      - pattern: $E.outerHTML = $V
+      - pattern: $E.insertAdjacentHTML(...)
+      - pattern: document.write(...)
+      - pattern: eval(...)
+      - pattern: new Function(...)
+
+  - id: safefetch-no-generic-tauri-plugins
+    languages: [json]
+    severity: ERROR
+    message: The webview must not get shell/fs/http/opener/dialog permissions.
+    pattern-regex: '"(shell|fs|http|opener|dialog|process|updater):[a-z-]+"'
+    paths:
+      include: ["/src-tauri/capabilities/"]

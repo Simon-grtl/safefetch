@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SafeFetch</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3 27 7v8c0 7-5 12-11 14C10 27 5 22 5 15V7z"/><path class="arrow" d="M14.5 9h3v7h3.5L16 21l-5-5h3.5z"/></svg>
+      <span>SafeFetch</span>
+    </div>
+    <div class="status" id="env-status" aria-live="polite"></div>
+    <button class="ghost" id="open-settings" type="button">Settings</button>
+  </header>
+
+  <main>
+    <section class="setup hidden" id="setup">
+      <h2>Before you start</h2>
+      <ul id="setup-list"></ul>
+      <div class="setup-actions">
+        <button type="button" id="setup-dest">Choose destination folder…</button>
+        <button type="button" class="ghost" id="setup-sigs">Update ClamAV signatures</button>
+        <button type="button" class="ghost" id="setup-recheck">Re-check</button>
+      </div>
+      <details id="install-help"><summary>How to install ClamAV on this system</summary><ol id="install-steps"></ol></details>
+    </section>
+
+    <section class="input-card">
+      <label for="links">Links to download — one per line, optionally followed by the expected SHA-256</label>
+      <textarea id="links" rows="4" spellcheck="false" placeholder="https://example.org/file.iso
+https://example.org/tool.zip  3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b"></textarea>
+      <div class="input-row">
+        <div id="input-errors" class="errors" aria-live="polite"></div>
+        <button type="button" id="submit" class="primary">Fetch &amp; scan</button>
+      </div>
+    </section>
+
+    <section class="jobs">
+      <div class="jobs-head">
+        <h2>Files</h2>
+        <button type="button" class="ghost small" id="clear">Clear finished</button>
+      </div>
+      <div id="empty" class="empty">No downloads yet. Paste a link above.</div>
+      <ul id="job-list"></ul>
+    </section>
+  </main>
+
+  <dialog id="details">
+    <form method="dialog" class="dialog-head"><h2 id="d-title">Details</h2><button class="ghost" value="close" aria-label="Close">✕</button></form>
+    <div class="dialog-body" id="d-body"></div>
+    <div class="dialog-actions" id="d-actions"></div>
+  </dialog>
+
+  <dialog id="settings">
+    <form method="dialog" class="dialog-head"><h2>Settings</h2><button class="ghost" value="close" aria-label="Close">✕</button></form>
+    <div class="dialog-body">
+      <fieldset>
+        <legend>Destination</legend>
+        <div class="row"><span id="s-dest" class="mono">Not set</span><button type="button" id="s-choose">Choose…</button></div>
+        <p class="hint">Files are quarantined in a hidden folder inside the destination (same disk, so delivery is instant and atomic).</p>
+      </fieldset>
+      <fieldset>
+        <legend>VirusTotal API key</legend>
+        <div class="row"><input type="password" id="s-key" autocomplete="off" placeholder="64-character key" maxlength="64"><button type="button" id="s-key-save">Save</button><button type="button" class="ghost" id="s-key-del">Remove</button></div>
+        <p class="hint" id="s-key-state"></p>
+        <p class="hint">Stored in your system keychain, never in a file. Only URLs and SHA-256 hashes are sent to VirusTotal — never your files, unless you click “Upload to VirusTotal” yourself.</p>
+      </fieldset>
+      <fieldset>
+        <legend>Verdict thresholds (VirusTotal detections)</legend>
+        <div class="grid">
+          <label>Dangerous at ≥ <input type="number" id="s-vt-danger" min="1" max="100"></label>
+          <label>Suspect at ≥ <input type="number" id="s-vt-susp" min="1" max="100"></label>
+          <label>Block link (URL) at ≥ <input type="number" id="s-url" min="1" max="100"></label>
+          <label>Block link (domain) at ≥ <input type="number" id="s-domain" min="1" max="100"></label>
+        </div>
+        <label class="check"><input type="checkbox" id="s-require-vt"> Treat a missing/failed VirusTotal lookup as “Not analyzed”</label>
+      </fieldset>
+      <fieldset>
+        <legend>Downloads</legend>
+        <div class="grid">
+          <label>Simultaneous downloads <input type="number" id="s-conc" min="1" max="8"></label>
+          <label>Max file size (MiB, 0 = no limit) <input type="number" id="s-max" min="0"></label>
+        </div>
+        <label class="check"><input type="checkbox" id="s-http"> Allow plain HTTP links (a warning is shown)</label>
+        <label class="check"><input type="checkbox" id="s-defender"> Also scan with Microsoft Defender (Windows)</label>
+        <label class="check"><input type="checkbox" id="s-fresh"> Update ClamAV signatures daily</label>
+        <label class="check"><input type="checkbox" id="s-upd"> Check for SafeFetch updates</label>
+      </fieldset>
+      <p id="s-error" class="errors"></p>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" class="ghost" id="s-check-update">Check for updates</button>
+      <button type="button" class="primary" id="s-save">Save settings</button>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+</body>
+</html>

@@ -1,0 +1,39 @@
+[package]
+name = "safefetch"
+description = "Download files into quarantine, scan them, deliver only clean files."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+safefetch-core = { path = "../crates/safefetch-core" }
+tauri = { version = "2", features = [] }
+# Used ONLY from Rust (no JS permissions granted): native folder picker,
+# opening the VirusTotal report in the browser, signed self-update.
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-updater = "2"
+# OS credential vaults: Windows Credential Manager, macOS Keychain,
+# Secret Service (GNOME Keyring / KWallet) on Linux. No plaintext fallback.
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "rt"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
+url = "2"
+
+# Development-only runtime inspection (tauri-connector). Never in release:
+# guarded by a compile_error! in main.rs and checked in CI.
+tauri-plugin-connector = { version = "0.17", optional = true }
+
+[features]
+dev-connector = ["dep:tauri-plugin-connector"]

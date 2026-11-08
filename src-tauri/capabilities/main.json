@@ -1,0 +1,32 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "Main window: SafeFetch's own commands and receiving job events. No shell, fs, http, dialog, opener or updater permission is granted to the webview.",
+  "windows": ["main"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-submit-links",
+    "allow-list-jobs",
+    "allow-cancel-job",
+    "allow-retry-job",
+    "allow-force-download",
+    "allow-rescan-job",
+    "allow-release-job",
+    "allow-discard-job",
+    "allow-clear-finished",
+    "allow-upload-to-virustotal",
+    "allow-open-virustotal-report",
+    "allow-reveal-delivered",
+    "allow-get-settings",
+    "allow-save-settings",
+    "allow-choose-destination",
+    "allow-has-api-key",
+    "allow-set-api-key",
+    "allow-delete-api-key",
+    "allow-environment",
+    "allow-update-signatures",
+    "allow-check-app-update",
+    "allow-install-app-update"
+  ]
+}

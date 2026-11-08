@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-force-download"
+description = "Enables the force_download command without any pre-configured scope."
+commands.allow = ["force_download"]
+
+[[permission]]
+identifier = "deny-force-download"
+description = "Denies the force_download command without any pre-configured scope."
+commands.deny = ["force_download"]

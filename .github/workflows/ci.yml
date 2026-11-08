@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Linux system dependencies (Tauri + ClamAV)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libssl-dev libdbus-1-dev clamav clamav-daemon
+          sudo systemctl stop clamav-freshclam || true
+
+      - name: macOS ClamAV
+        if: runner.os == 'macOS'
+        run: brew install clamav
+
+      - name: Windows ClamAV
+        if: runner.os == 'Windows'
+        run: choco install clamav -y --no-progress
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests (ClamAV required — EICAR, archives, limits)
+        env:
+          SAFEFETCH_REQUIRE_CLAMAV: "1"
+        run: cargo test --workspace
+
+      - name: clamd integration (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          D=$RUNNER_TEMP/clamd; mkdir -p $D/db
+          echo "44d88612fea8a8f36de82e1278abb02f:68:SafeFetch.Test.EICAR" > $D/db/test.hdb
+          cat > $D/clamd.conf <<EOF
+          LocalSocket $D/clamd.sock
+          Foreground yes
+          DatabaseDirectory $D/db
+          AlertExceedsMax yes
+          AlertEncrypted yes
+          MaxFileSize 2047M
+          MaxScanSize 4000M
+          StreamMaxLength 2047M
+          EOF
+          clamd -c $D/clamd.conf &
+          for i in $(seq 1 30); do [ -S $D/clamd.sock ] && break; sleep 1; done
+          SAFEFETCH_CLAMD_CONF=$D/clamd.conf cargo test -p safefetch-core --test clamd
+
+      - name: Large file test (3 GiB, Linux only)
+        if: runner.os == 'Linux'
+        run: cargo test --release -p safefetch-core --test large -- --ignored
+
+      - name: Release build must not contain tauri-connector
+        shell: bash
+        run: |
+          if cargo tree -p safefetch -e normal --target all | grep -i "tauri-plugin-connector"; then
+            echo "::error::tauri-plugin-connector is in the default dependency tree"; exit 1
+          fi
+          # Enabling the dev feature in a release build must fail to compile.
+          if cargo check -p safefetch --release --features dev-connector 2>/dev/null; then
+            echo "::error::dev-connector compiled in release mode"; exit 1
+          fi
+
+  supply-chain:
+    name: cargo-deny & cargo-audit
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit --deny warnings
+
+  semgrep:
+    name: Semgrep
+    runs-on: ubuntu-22.04
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - name: Semgrep (project rules + Rust/JS/secrets packs)
+        run: semgrep scan --error --config .semgrep/ --config p/rust --config p/javascript --config p/secrets --exclude target

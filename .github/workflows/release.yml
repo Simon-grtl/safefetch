@@ -1,0 +1,72 @@
+name: Release
+
+# Builds signed installers for the three OSes and publishes `latest.json`
+# for the Tauri updater. Required repository secrets:
+#   TAURI_SIGNING_PRIVATE_KEY           (content of safefetch.key, from `cargo tauri signer generate`)
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+# Optional (OS code signing, recommended to avoid SmartScreen/Gatekeeper warnings):
+#   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
+#   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            args: ""
+          - os: windows-latest
+            args: ""
+          - os: macos-latest
+            args: "--target universal-apple-darwin"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libssl-dev libdbus-1-dev
+
+      - name: Guard — no dev tooling in release
+        shell: bash
+        run: |
+          if cargo tree -p safefetch -e normal --target all | grep -i "tauri-plugin-connector"; then exit 1; fi
+          grep -q "REPLACE_WITH" src-tauri/tauri.conf.json && { echo "::error::set plugins.updater.pubkey and endpoints in tauri.conf.json"; exit 1; } || true
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: SafeFetch ${{ github.ref_name }}
+          releaseDraft: true
+          includeUpdaterJson: true
+          args: ${{ matrix.args }}
+
+      - name: Verify the shipped binary has no connector code
+        shell: bash
+        run: |
+          BIN=$(find target -path '*release/safefetch' -o -path '*release/safefetch.exe' | head -1)
+          if [ -n "$BIN" ] && grep -a -c "tauri_plugin_connector\|tauri-plugin-connector" "$BIN"; then
+            echo "::error::connector symbols found in release binary"; exit 1
+          fi

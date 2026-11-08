@@ -1,0 +1,44 @@
+[package]
+name = "safefetch-core"
+description = "Download, quarantine, scan and deliver files safely (GUI-independent core)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# HTTP client: same major version as Tauri's updater (no duplicate stack).
+# rustls + OS certificate verifier (rustls-platform-verifier), ring provider
+# (already used by Tauri), no OpenSSL, and NO transparent decompression
+# features (gzip/brotli/deflate/zstd deliberately absent).
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream", "json", "multipart", "http2", "system-proxy"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "net", "sync", "time", "process"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+url = "2"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+getrandom = "0.3"
+percent-encoding = "2"
+unicode-normalization = "0.1"
+# canonicalize() without the \\?\ prefix on Windows (readable paths in the UI).
+dunce = "1"
+fs4 = { version = "0.13", default-features = false, features = ["sync"] }
+tracing = "0.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+xattr = "1"
+
+[dev-dependencies]
+wiremock = "0.6"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }

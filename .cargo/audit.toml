@@ -1,0 +1,11 @@
+# cargo-audit configuration (mirrors deny.toml). Only "unmaintained"/"unsound"
+# notices reached through Tauri's Linux GTK/D-Bus stack; none is a known
+# exploitable vulnerability for SafeFetch. Re-evaluate at every release.
+[advisories]
+ignore = [
+    "RUSTSEC-2024-0370", # proc-macro-error (build-time, gtk-rs 0.18)
+    "RUSTSEC-2026-0371", # zbus_names (zbus <- tauri-plugin-opener, Linux)
+    "RUSTSEC-2026-0370", # zvariant (same)
+    "RUSTSEC-2026-0372", # zvariant_derive (same)
+    "RUSTSEC-2024-0429", # glib VariantStrIter unsound; API not used by SafeFetch/Tauri paths we call
+]

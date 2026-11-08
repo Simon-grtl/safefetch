@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-rescan-job"
+description = "Enables the rescan_job command without any pre-configured scope."
+commands.allow = ["rescan_job"]
+
+[[permission]]
+identifier = "deny-rescan-job"
+description = "Denies the rescan_job command without any pre-configured scope."
+commands.deny = ["rescan_job"]

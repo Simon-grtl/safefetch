@@ -1,0 +1,18 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "io.github.safefetch.app.dev",
+  "bundle": { "createUpdaterArtifacts": false },
+  "app": {
+    "security": {
+      "capabilities": [
+        "main",
+        {
+          "identifier": "dev-connector",
+          "description": "DEVELOPMENT ONLY (tauri-connector). Loaded exclusively via: cargo tauri dev --features dev-connector --config src-tauri/tauri.dev.conf.json",
+          "windows": ["main"],
+          "permissions": ["connector:default"]
+        }
+      ]
+    }
+  }
+}

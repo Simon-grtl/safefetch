@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-choose-destination"
+description = "Enables the choose_destination command without any pre-configured scope."
+commands.allow = ["choose_destination"]
+
+[[permission]]
+identifier = "deny-choose-destination"
+description = "Denies the choose_destination command without any pre-configured scope."
+commands.deny = ["choose_destination"]
