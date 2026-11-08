@@ -155,6 +155,51 @@ pub fn check_redirect(from: &Url, to: &Url, public_only: bool) -> Result<()> {
     Ok(())
 }
 
+/// For a redirect target when the user typed a public link: the host must
+/// resolve locally, and only to public addresses. This also covers the case
+/// where a system HTTP proxy is used (the proxy, not our resolver, would
+/// otherwise resolve intranet names such as `intranet.corp` — audit F3).
+/// Residual risk: a proxy may resolve the name differently (split DNS).
+pub async fn ensure_public_target(url: &Url) -> Result<()> {
+    let host = match url.host() {
+        Some(Host::Domain(d)) => d.to_string(),
+        Some(Host::Ipv4(ip)) => {
+            return if is_public_v4(ip) {
+                Ok(())
+            } else {
+                Err(Error::Policy(
+                    "redirect to a private address refused".into(),
+                ))
+            }
+        }
+        Some(Host::Ipv6(ip)) => {
+            return if is_public_v6(ip) {
+                Ok(())
+            } else {
+                Err(Error::Policy(
+                    "redirect to a private address refused".into(),
+                ))
+            }
+        }
+        None => return Err(Error::Policy("redirect without host".into())),
+    };
+    let port = url.port_or_known_default().unwrap_or(443);
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|_| {
+            Error::Policy(format!(
+                "redirect to a host that does not resolve publicly ({host}) refused"
+            ))
+        })?
+        .collect();
+    if addrs.is_empty() || addrs.iter().any(|a| !is_public_ip(a.ip())) {
+        return Err(Error::Policy(format!(
+            "redirect to a private or internal host ({host}) refused"
+        )));
+    }
+    Ok(())
+}
+
 /// A URL safe to show in the UI or logs: scheme, host and path only.
 pub fn display_url(url: &Url) -> String {
     let mut s = format!("{}://{}", url.scheme(), url.host_str().unwrap_or("?"));
@@ -266,5 +311,16 @@ mod tests {
         let r = PublicOnlyResolver;
         let res = r.resolve("localhost".parse().unwrap()).await;
         assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn redirect_targets_must_resolve_publicly() {
+        // Audit F3: even through a proxy, internal names are refused.
+        assert!(ensure_public_target(&u("http://localhost/")).await.is_err());
+        assert!(ensure_public_target(&u("http://10.0.0.1/")).await.is_err());
+        assert!(ensure_public_target(&u("http://intranet.invalid/"))
+            .await
+            .is_err());
+        assert!(ensure_public_target(&u("http://8.8.8.8/")).await.is_ok());
     }
 }

@@ -792,3 +792,53 @@ async fn expired_checked_target_with_switched_chain_is_refused() {
     assert!(e.dest_files().is_empty());
     assert!(e.quarantine_files().is_empty());
 }
+
+/// Patch a little-endian u16/u32 field.
+fn put(buf: &mut [u8], off: usize, v: u32, len: usize) {
+    buf[off..off + len].copy_from_slice(&v.to_le_bytes()[..len]);
+}
+
+fn find(buf: &[u8], sig: &[u8]) -> usize {
+    buf.windows(sig.len()).position(|w| w == sig).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn archives_clamav_cannot_unpack_are_never_clean() {
+    // Security audit F1: zips that ClamAV fails to decompress (while other
+    // tools may succeed) used to come back "Clean".
+    require_clamav!();
+    let base = zip_of(&[("eicar.com", EICAR)]);
+    let local = find(&base, b"PK\x03\x04");
+    let central = find(&base, b"PK\x01\x02");
+    let mut lzma = base.clone(); // compression method 14 (LZMA)
+    put(&mut lzma, local + 8, 14, 2);
+    put(&mut lzma, central + 10, 14, 2);
+    let mut bad_size = base.clone(); // lying local-header compressed size
+    put(&mut bad_size, local + 18, 0x7fff_ffff, 4);
+    let mut zip64 = base.clone(); // sizes forced to the ZIP64 marker
+    put(&mut zip64, local + 18, 0xffff_ffff, 4);
+    put(&mut zip64, local + 22, 0xffff_ffff, 4);
+    let srv = RawServer::start(static_server(vec![
+        ("/lzma.zip", lzma, vec![]),
+        ("/size.zip", bad_size, vec![]),
+        ("/z64.zip", zip64, vec![]),
+    ]))
+    .await;
+    let e = env(EnvOptions::default());
+    for p in ["/lzma.zip", "/size.zip", "/z64.zip"] {
+        let j = e.run(&srv.url(p)).await;
+        let level = j.verdict.as_ref().map(|v| v.level);
+        assert!(
+            matches!(
+                level,
+                Some(VerdictLevel::NotAnalyzed) | Some(VerdictLevel::Dangerous)
+            ),
+            "{p}: {j:#?}"
+        );
+    }
+    assert!(
+        e.dest_files().is_empty(),
+        "nothing may be delivered: {:?}",
+        e.dest_files()
+    );
+}

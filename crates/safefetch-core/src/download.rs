@@ -89,6 +89,9 @@ pub async fn open(
                 .join(loc)
                 .map_err(|_| Error::Policy("redirect to an invalid URL".into()))?;
             check_redirect(&current, &next, ctx.public_only)?;
+            if ctx.public_only {
+                crate::net::ensure_public_target(&next).await?;
+            }
             if next.scheme() == "http" && !ctx.allow_http {
                 return Err(Error::Policy(
                     "redirect to plain HTTP refused by settings".into(),

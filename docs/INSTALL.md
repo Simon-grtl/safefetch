@@ -31,8 +31,8 @@ sudo pacman -S clamav && sudo freshclam
 ```
 On Linux the system service owns the signature database, so the in-app "Update signatures" button may fail without root: that is expected, the service does it.
 
-### Optional: clamd (faster for many files)
-SafeFetch uses clamd only if its `clamd.conf` is readable and contains:
+### clamd (fallback only)
+SafeFetch always prefers `clamscan`, because only clamscan lets it detect archive content that ClamAV silently skipped. clamd is used only when clamscan is not installed, and even then archives/installers scanned by clamd are reported "Not analyzed". clamd is used only if its `clamd.conf` is readable, has no `Scan... no` option, and contains:
 ```
 AlertExceedsMax yes
 AlertEncrypted yes

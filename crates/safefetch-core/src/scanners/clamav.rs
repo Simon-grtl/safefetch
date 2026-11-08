@@ -117,6 +117,13 @@ const TRUNCATION_MARKERS: &[&str] = &[
     "exceeded",
     "exceeds max",
     "too large",
+    // Members ClamAV could not decompress while other tools can (found by the
+    // security audit: LZMA-compressed entries, lying local-header sizes,
+    // forced ZIP64 headers). Verified on ClamAV 1.5.4.
+    "unsupported method",
+    "extraction failed",
+    "stream out of file",
+    "decompression failed",
 ];
 
 pub fn truncation_marker(line: &str) -> Option<String> {
@@ -124,7 +131,11 @@ pub fn truncation_marker(line: &str) -> Option<String> {
     if !l.starts_with("libclamav debug") {
         return None;
     }
-    TRUNCATION_MARKERS.iter().any(|m| l.contains(m)).then(|| {
+    // "Skipping decompression ... size: 0, compressed data not available" is
+    // logged for directory entries and empty files: benign. Any non-empty
+    // entry ClamAV skips means unscanned content.
+    let skipped_nonempty = l.contains("skipping decompression") && !l.contains("size: 0,");
+    (skipped_nonempty || TRUNCATION_MARKERS.iter().any(|m| l.contains(m))).then(|| {
         line.trim_start_matches("LibClamAV debug:")
             .trim()
             .chars()
@@ -238,6 +249,8 @@ pub struct ClamdConf {
     pub alert_encrypted: bool,
     pub local_socket: Option<String>,
     pub tcp: Option<(String, u16)>,
+    /// `Scan*` options set to "no" (e.g. ScanArchive no): unusable for us.
+    pub scan_disabled: Vec<String>,
 }
 
 /// Parse a size such as "100M", "4G", "512K" or "1048576".
@@ -263,6 +276,7 @@ pub fn parse_clamd_conf(text: &str) -> ClamdConf {
         alert_encrypted: false,
         local_socket: None,
         tcp: None,
+        scan_disabled: Vec::new(),
     };
     let mut tcp_addr = "127.0.0.1".to_string();
     let mut tcp_port = None;
@@ -280,6 +294,12 @@ pub fn parse_clamd_conf(text: &str) -> ClamdConf {
             "StreamMaxLength" => c.stream_max_length = parse_size(v).unwrap_or(c.stream_max_length),
             "AlertExceedsMax" => c.alert_exceeds_max = yes,
             "AlertEncrypted" => c.alert_encrypted = yes,
+            k if k.starts_with("Scan")
+                && !yes
+                && matches!(v.to_ascii_lowercase().as_str(), "no" | "false" | "0") =>
+            {
+                c.scan_disabled.push(k.to_string())
+            }
             "LocalSocket" => c.local_socket = Some(v.to_string()),
             "TCPSocket" => tcp_port = v.parse().ok(),
             "TCPAddr" => tcp_addr = v.to_string(),
@@ -300,6 +320,12 @@ impl ClamdConf {
     /// clamd may be used for a file of `size` only if it would alert (not
     /// silently pass) on anything it cannot fully scan.
     pub fn sufficient_for(&self, size: u64) -> Result<(), String> {
+        if !self.scan_disabled.is_empty() {
+            return Err(format!(
+                "clamd.conf disables scanning: {}",
+                self.scan_disabled.join(", ")
+            ));
+        }
         if !self.alert_exceeds_max {
             return Err("clamd.conf lacks \"AlertExceedsMax yes\"".into());
         }
@@ -452,12 +478,12 @@ pub fn choose_backend(s: &ClamAvSettings, size: u64) -> Backend {
             Ok(address) => Backend::Clamd { address },
             Err(e) => Backend::None(format!("clamd not usable: {e}")),
         },
-        ClamAvMode::Auto => match clamd() {
-            Ok(address) => Backend::Clamd { address },
-            Err(_) => clamscan.map_or_else(
-                || Backend::None("ClamAV is not installed (clamscan not found)".into()),
-                |exe| Backend::Clamscan { exe },
-            ),
+        // clamscan first: only its --debug stream can reveal archive members
+        // ClamAV skipped. clamd is the fallback when clamscan is missing.
+        ClamAvMode::Auto => match (clamscan, clamd()) {
+            (Some(exe), _) => Backend::Clamscan { exe },
+            (None, Ok(address)) => Backend::Clamd { address },
+            (None, Err(_)) => Backend::None("ClamAV is not installed (clamscan not found)".into()),
         },
     }
 }
@@ -482,6 +508,14 @@ pub async fn scan(s: &ClamAvSettings, file: &Path) -> EngineResult {
     }
     match choose_backend(s, size) {
         Backend::Clamd { address } => {
+            // clamd gives no way to know whether every archive member was
+            // decompressed (security audit F2): a "clean" container from clamd
+            // is never trusted.
+            if looks_like_container(file) {
+                return EngineResult::NotScanned(
+                    "archive/container scanned through clamd cannot be proven complete; install clamscan".into(),
+                );
+            }
             let r = scan_with_clamd(
                 &address,
                 file,
@@ -503,6 +537,53 @@ pub async fn scan(s: &ClamAvSettings, file: &Path) -> EngineResult {
         Backend::Clamscan { exe } => scan_with_clamscan(&exe, s, file).await,
         Backend::None(why) => EngineResult::Unavailable(why),
     }
+}
+
+/// Magic-byte sniffing of formats ClamAV unpacks (archives, installers,
+/// office/PDF containers, disk images, executables that may embed archives).
+pub fn looks_like_container(file: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(file) else {
+        return true;
+    };
+    let mut head = vec![0u8; 0x9006];
+    let n = f.read(&mut head).unwrap_or(0);
+    let h = &head[..n];
+    let starts = |m: &[u8]| h.starts_with(m);
+    let at = |off: usize, m: &[u8]| h.len() >= off + m.len() && &h[off..off + m.len()] == m;
+    let magic = starts(b"PK\x03\x04")
+        || starts(b"PK\x05\x06")
+        || starts(b"PK\x07\x08")
+        || starts(&[0x1f, 0x8b])
+        || starts(b"BZh")
+        || starts(&[0xfd, b'7', b'z', b'X', b'Z', 0])
+        || starts(&[b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c])
+        || starts(b"Rar!\x1a\x07")
+        || starts(&[0x28, 0xb5, 0x2f, 0xfd])
+        || starts(b"MSCF")
+        || starts(b"ITSF")
+        || starts(&[0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1])
+        || starts(b"%PDF")
+        || starts(b"MZ")
+        || starts(&[0x7f, b'E', b'L', b'F'])
+        || starts(&[0xcf, 0xfa, 0xed, 0xfe])
+        || starts(&[0xca, 0xfe, 0xba, 0xbe])
+        || starts(&[0x60, 0xea])
+        || at(2, b"-lh")
+        || at(257, b"ustar")
+        || at(0x8001, b"CD001")
+        || at(0x8801, b"CD001")
+        || at(0x9001, b"CD001")
+        || starts(b"xar!")
+        || starts(b"!<arch>")
+        || starts(&[0x1f, 0x9d])
+        || starts(b"{\\rtf");
+    if magic {
+        return true;
+    }
+    // Apple disk image: "koly" trailer in the last 512 bytes.
+    let mut tail = [0u8; 4];
+    f.seek(SeekFrom::End(-512)).is_ok() && f.read_exact(&mut tail).is_ok() && &tail == b"koly"
 }
 
 /// ClamAV version and signature date (from `clamscan --version`), e.g.
@@ -719,5 +800,74 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(scan(&s, &p).await, EngineResult::Unavailable(_)));
+    }
+
+    #[test]
+    fn clamd_conf_with_scanning_disabled_is_refused() {
+        let c = parse_clamd_conf("AlertExceedsMax yes\nAlertEncrypted yes\nStreamMaxLength 2047M\nMaxFileSize 2047M\nScanArchive no\n");
+        assert!(c.sufficient_for(1).is_err());
+    }
+
+    #[test]
+    fn container_sniffing() {
+        let d = tempfile::tempdir().unwrap();
+        let w = |name: &str, data: &[u8]| {
+            let p = d.path().join(name);
+            std::fs::write(&p, data).unwrap();
+            p
+        };
+        assert!(looks_like_container(&w("z", b"PK\x03\x04rest")));
+        assert!(looks_like_container(&w("g", &[0x1f, 0x8b, 8, 0])));
+        assert!(looks_like_container(&w("e", b"MZ\x90\x00")));
+        assert!(looks_like_container(&w("p", b"%PDF-1.7")));
+        let mut tar = vec![0u8; 600];
+        tar[257..262].copy_from_slice(b"ustar");
+        assert!(looks_like_container(&w("t", &tar)));
+        assert!(!looks_like_container(&w("txt", b"just some text")));
+        assert!(!looks_like_container(&w("bin", &[7u8; 4096])));
+    }
+
+    #[test]
+    fn auto_mode_prefers_clamscan() {
+        let d = tempfile::tempdir().unwrap();
+        let exe = d.path().join("clamscan");
+        std::fs::write(&exe, b"").unwrap();
+        let conf = d.path().join("clamd.conf");
+        std::fs::write(&conf, "LocalSocket /x.sock\nAlertExceedsMax yes\nAlertEncrypted yes\nStreamMaxLength 2047M\nMaxFileSize 2047M\n").unwrap();
+        let s = ClamAvSettings {
+            clamscan_path: Some(exe.clone()),
+            clamd_conf_path: Some(conf),
+            ..Default::default()
+        };
+        assert_eq!(choose_backend(&s, 10), Backend::Clamscan { exe });
+    }
+
+    #[tokio::test]
+    async fn clamd_never_vouches_for_containers() {
+        let d = tempfile::tempdir().unwrap();
+        let conf = d.path().join("clamd.conf");
+        std::fs::write(&conf, "TCPSocket 1\nAlertExceedsMax yes\nAlertEncrypted yes\nStreamMaxLength 2047M\nMaxFileSize 2047M\n").unwrap();
+        let s = ClamAvSettings {
+            mode: ClamAvMode::ClamdOnly,
+            clamd_conf_path: Some(conf),
+            ..Default::default()
+        };
+        let z = d.path().join("a.quarantine");
+        std::fs::write(&z, b"PK\x03\x04whatever").unwrap();
+        assert!(matches!(scan(&s, &z).await, EngineResult::NotScanned(_)));
+    }
+
+    #[test]
+    fn archive_failure_markers() {
+        for l in [
+            "LibClamAV debug: cli_unzip: unsupported method (14)",
+            "LibClamAV debug: cli_unzip: extraction failed",
+            "LibClamAV debug: cli_unzip: local header - stream out of file",
+            "LibClamAV debug: cli_unzip: Skipping decompression of file entry at offset: 0x0, size: 68, compressed data not available",
+        ] {
+            assert!(truncation_marker(l).is_some(), "{l}");
+        }
+        // Directory entries / empty files are benign.
+        assert!(truncation_marker("LibClamAV debug: cli_unzip: Skipping decompression of file entry at offset: 0x0, size: 0, compressed data not available").is_none());
     }
 }

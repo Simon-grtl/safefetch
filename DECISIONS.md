@@ -14,7 +14,10 @@ choice changes; keep the "why" and the alternative that was rejected.
 ### Download & quarantine
 - **Quarantine = `<destination>/.safefetch-quarantine/`** (0700, hidden attribute on Windows). Guarantees the same volume, so delivery is atomic and copy-free. Alternative (separate folder elsewhere) rejected: needs a cross-volume copy or a same-volume check on Windows that `std` cannot express.
 - **Random 128-bit names + `.quarantine` extension + mode 0600 + MOTW/`com.apple.quarantine`.** No association → double-click does not run anything.
-- **Manual redirect loop** (max 5 by default) validating every hop; no https→http; public→private hops refused; a DNS resolver that refuses private addresses when the user typed a public URL (DNS-rebinding defence).
+- **Manual redirect loop** (max 5 by default) validating every hop; no https→http; public→private hops refused; a DNS resolver that refuses private addresses when the user typed a public URL (DNS-rebinding defence); and each redirect target is resolved locally and must be public, which also holds when a system proxy is used (audit F3).
+- **Re-open after a check goes to the checked URL** (audit M1): the VirusTotal-checked final URL is requested directly; if it expired, the original link is followed and must land on the same scheme/host/port/path.
+- **VirusTotal never receives user:password or #fragment** of a link (audit M2).
+- **A finished download is never discarded because of a later error** (scan/delivery): it stays in quarantine (audit M3).
 - **When the redirect target is on another host, VirusTotal checks the final URL before its body is read.**
 - **Resume:** `Range` + `If-Range` (strong ETag, else Last-Modified); 200 ⇒ restart from 0; 206 at the wrong offset ⇒ restart; size change between attempts ⇒ restart; redirect target host change while resuming ⇒ refused.
 - **`Accept-Encoding: identity` and no decompression features in reqwest**, so Content-Length = file bytes and no transport-level decompression bomb.
@@ -28,14 +31,16 @@ choice changes; keep the "why" and the alternative that was rejected.
   3. With `--alert-exceeds-max=yes`, top-level size and MaxScanSize overruns are reported (`Heuristics.Limits.Exceeded.*`).
   4. **But archive members larger than MaxFileSize are silently truncated** ("cli_unzip: trimming output size to maxfilesize") even with `--alert-exceeds-max`.
   ⇒ Decisions: files ≥ 2 GiB are "Not analyzed"; clamscan runs with MaxFileSize 2047M, MaxScanSize 4000M, max-files 100000, recursion 30, scan-time 30 min, `--alert-exceeds-max`, `--alert-encrypted`, and **`--debug` whose stderr is scanned (streamed) for truncation markers**; any marker ⇒ "Not analyzed".
-- **clamd only when provably safe:** its clamd.conf must be readable and contain `AlertExceedsMax yes`, `AlertEncrypted yes`, `MaxFileSize ≥ 2047M` and a sufficient `StreamMaxLength`; otherwise clamscan. Rationale: clamd has no debug stream, so truncation could not be detected. clamd down ⇒ fallback to clamscan (Auto mode).
-- **Defender:** `MpCmdRun -Scan -ScanType 3 -File <f> -DisableRemediation` (Defender reports but does not delete). Its archive/size limits are undocumented, so a Defender "clean" alone never yields Clean.
+- **clamscan first, clamd only as a fallback** (changed after the security audit, F2). clamd cannot reveal skipped archive members (no debug stream) and was shown to return OK for an archive whose 2.2 GiB member hides EICAR. So: Auto mode uses clamscan whenever installed; clamd (if its clamd.conf proves `AlertExceedsMax yes`, `AlertEncrypted yes`, `MaxFileSize ≥ 2047M`, enough `StreamMaxLength`, and no `Scan* no`) is used only when clamscan is missing, and its "clean" is never accepted for containers (archives, installers, PDF/Office, executables, disk images) ⇒ Not analyzed. This deliberately deviates from "clamd if available": slower (clamscan reloads signatures per file) but never wrongly Clean.
+- **Archive failures are "Not analyzed"** (audit F1): debug markers `unsupported method`, `extraction failed`, `stream out of file`, non-empty `skipping decompression`, `trimming output size`, `exceeded`…
+- **Defender:** optional extra engine: missing/disabled Defender is skipped with a warning (audit M4); errors still block Clean. `MpCmdRun -Scan -ScanType 3 -File <f> -DisableRemediation` (Defender reports but does not delete). Its archive/size limits are undocumented, so a Defender "clean" alone never yields Clean.
 - **Verdict rules** (worst signal wins): local detection or VT ≥ dangerous threshold (3) ⇒ Dangerous (deleted); VT ≥ suspicious threshold (1) or checksum mismatch ⇒ Suspect; any local engine incomplete/failed/missing ⇒ Not analyzed; Clean requires at least one complete local scan. VirusTotal failure/no key does not block Clean unless "require VirusTotal" is enabled (default off, so the app works without a key).
 - **VT counts:** thresholds use the `malicious` count only; `suspicious` is shown but not counted.
 - **Link pre-check:** blocked when URL detections ≥ 2 or domain detections ≥ 3 (configurable). The user can still "Download anyway" into quarantine (the file is still scanned).
 - **Scans are serialized** (one at a time) — clamscan loads the whole signature DB per run (RAM/CPU heavy); downloads stay parallel (1–8, default 2).
 
 ### VirusTotal
+- Uploads need a **native confirmation dialog shown by Rust** (a compromised webview cannot trigger one).
 - API v3, `x-apikey` header marked sensitive. Shared rate limiter: 15 s spacing (4/min) and 500/day by default; 429 ⇒ exponential backoff that delays every queued request. Upload exists only as an explicit, double-confirmed action, ≤ 32 MiB (free API direct-upload limit).
 
 ### Secrets & UI security

@@ -11,19 +11,19 @@ Review every change against these rules. Any violation is a blocker.
 
 ## Network
 6. HTTP clients are built with `net::build_client`: no automatic redirects, no transparent decompression (`Accept-Encoding: identity`), connect + idle timeouts, rustls only.
-7. Each redirect hop goes through `net::check_redirect` (http/https only, no https→http, no public→private/loopback, no credentials) and the hop limit.
+7. Each redirect hop goes through `net::check_redirect` (http/https only, no https→http, no public→private/loopback, no credentials), `net::ensure_public_target` when the link is public (also effective behind a proxy), and the hop limit. After a VirusTotal check of a redirect target, the download uses that exact checked URL.
 8. When the user typed a public URL, DNS goes through `PublicOnlyResolver`.
 9. Announced size (Content-Length / Content-Range) is enforced against bytes received; max size and free disk space are checked before and during the download.
 10. URLs shown or logged go through `net::display_url` (no query string, no userinfo).
 
 ## Verdict
 11. A file is **Clean** only if at least one local engine completed AND no engine/VirusTotal signal says otherwise (`verdict::decide`). Any limit, truncation, encryption, error or missing engine ⇒ Not analyzed.
-12. clamscan always runs with raised limits, `--alert-exceeds-max=yes`, `--alert-encrypted=yes` and `--debug` (truncation markers); files ≥ 2 GiB are Not analyzed (libclamav limit). clamd is used only when its clamd.conf proves `AlertExceedsMax yes`, `AlertEncrypted yes`, `MaxFileSize ≥ 2047M` and sufficient `StreamMaxLength`.
+12. clamscan always runs with raised limits, `--alert-exceeds-max=yes`, `--alert-encrypted=yes` and `--debug`; its stderr is scanned for truncation/extraction-failure markers (any ⇒ Not analyzed). Files ≥ 2 GiB are Not analyzed (libclamav limit). clamscan is preferred; clamd is a fallback only, requires a clamd.conf proving `AlertExceedsMax yes`, `AlertEncrypted yes`, `MaxFileSize ≥ 2047M`, sufficient `StreamMaxLength`, no `Scan* no`, and its "clean" is never accepted for containers (`looks_like_container`).
 13. Thresholds come from settings; never hard-code new ones.
 
 ## Secrets and privacy
 14. The VirusTotal key lives only in the OS keychain (`SecretStore`), is wrapped in `SecretString`, sent with a sensitive header, and is never logged, formatted, serialized or returned to the UI (write-only).
-15. Never send a file to VirusTotal automatically. `VtClient::upload_file` may only be reached from `Engine::upload_to_virustotal`, triggered by a double-confirmed UI action (`confirmed: true`).
+15. Never send a file to VirusTotal automatically; never send `user:password@` or `#fragment` of a link (`engine::vt_safe_url`). `VtClient::upload_file` may only be reached from `Engine::upload_to_virustotal`, after a native confirmation dialog shown from Rust (never trust a flag sent by the webview).
 16. History stores URL **hashes**, never plain URLs.
 
 ## Tauri / UI

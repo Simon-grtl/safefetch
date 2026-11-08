@@ -120,6 +120,13 @@ const EXECUTABLE_EXTENSIONS: &[&str] = &[
     "applescript",
     "tool",
     // Linux / cross-platform
+    "dmg",
+    "jnlp",
+    "xpi",
+    "crx",
+    "apk",
+    "deb",
+    "rpm",
     "sh",
     "bash",
     "zsh",
@@ -158,7 +165,12 @@ fn is_bidi_or_invisible(c: char) -> bool {
         | '\u{202A}'..='\u{202E}'       // LRE, RLE, PDF, LRO, RLO (RTLO)
         | '\u{2060}'..='\u{2064}'       // word joiner, invisible operators
         | '\u{2066}'..='\u{206F}'       // isolates and deprecated format chars
+        | '\u{034F}'                    // combining grapheme joiner
+        | '\u{17B4}' | '\u{17B5}'       // Khmer invisible vowels
+        | '\u{2800}'                    // Braille blank (renders as a space)
         | '\u{3164}'                    // Hangul filler
+        | '\u{FFFC}'                    // object replacement character
+        | '\u{1D173}'..='\u{1D17A}'     // musical formatting chars
         | '\u{FE00}'..='\u{FE0F}'       // variation selectors
         | '\u{FEFF}'                    // BOM / ZWNBSP
         | '\u{FFA0}'                    // halfwidth Hangul filler
@@ -578,5 +590,15 @@ mod tests {
         assert_eq!(n.name, "real.zip");
         let n = choose_name(None, &u, &u);
         assert_eq!(n.name, "download.php");
+    }
+
+    #[test]
+    fn invisible_padding_cannot_hide_the_real_extension() {
+        // Audit F4: Braille blanks between the decoy and the real extension.
+        let r = sanitize_filename(&format!("facture.pdf{}.exe", "\u{2800}".repeat(8)));
+        assert_eq!(r.name, "facture_pdf.exe");
+        assert!(r.warnings.contains(&NameWarning::DeceptiveDoubleExtension));
+        let r = sanitize_filename("invoice.pdf.dmg");
+        assert_eq!(r.name, "invoice_pdf.dmg");
     }
 }
