@@ -173,7 +173,7 @@ async fn clamav_limit_exceeded_is_never_clean() {
 async fn missing_clamav_means_not_analyzed() {
     let srv = RawServer::start(static_server(vec![("/f.txt", b"data".to_vec(), vec![])])).await;
     let e = env(EnvOptions {
-        settings: Box::new(|s| s.clamav.clamscan_path = Some("/nonexistent/clamscan".into())),
+        settings: Box::new(|s| s.clamav.clamscan_path = Some(missing_exe())),
         ..Default::default()
     });
     let j = e.run(&srv.url("/f.txt")).await;
@@ -222,7 +222,7 @@ async fn checksum_mismatch_is_suspect_then_user_decides() {
 async fn discard_removes_quarantined_file() {
     let srv = RawServer::start(static_server(vec![("/x", b"x".to_vec(), vec![])])).await;
     let e = env(EnvOptions {
-        settings: Box::new(|s| s.clamav.clamscan_path = Some("/nonexistent".into())),
+        settings: Box::new(|s| s.clamav.clamscan_path = Some(missing_exe())),
         ..Default::default()
     });
     let j = e.run(&srv.url("/x")).await;
@@ -507,7 +507,7 @@ async fn quarantine_survives_restart() {
     let srv = RawServer::start(static_server(vec![("/x", b"x".to_vec(), vec![])])).await;
     let dir = tempfile::tempdir().unwrap();
     let opts = || EnvOptions {
-        settings: Box::new(|s| s.clamav.clamscan_path = Some("/nonexistent".into())),
+        settings: Box::new(|s| s.clamav.clamscan_path = Some(missing_exe())),
         ..Default::default()
     };
     let e = env_in(dir, opts());
@@ -613,4 +613,182 @@ async fn virustotal_file_thresholds() {
             .iter()
             .all(|r| r.method.as_str() == "GET"));
     }
+}
+
+// ------------------------------------------------------ audit regressions --
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redirect_target_switch_after_virustotal_check_is_refused() {
+    // First answer: redirect to /good (checked by VirusTotal). After the
+    // check, SafeFetch re-requests the link: the server now redirects to /evil.
+    let vt = vt_server(0, 0).await;
+    let port = Arc::new(std::sync::Mutex::new(0u16));
+    let p2 = port.clone();
+    let srv = RawServer::start(Arc::new(move |req: &Req, n| {
+        let port = *p2.lock().unwrap();
+        match (req.path.as_str(), n) {
+            ("/start", 0) => Resp::redirect(&format!("http://localhost:{port}/good")),
+            ("/start", _) => Resp::redirect(&format!("http://localhost:{port}/evil")),
+            _ => Resp::ok(b"payload".to_vec()),
+        }
+    }))
+    .await;
+    *port.lock().unwrap() = srv.base.rsplit(':').next().unwrap().parse().unwrap();
+    let e = env(EnvOptions {
+        vt_base: Some(format!("{}/api/v3/", vt.uri())),
+        vt_key: true,
+        ..Default::default()
+    });
+    let j = e.run(&srv.url("/start")).await;
+    // The checked target (/good) is fetched directly; /evil is never contacted.
+    assert_eq!(srv.count("/evil"), 0, "unchecked target fetched: {j:#?}");
+    assert!(srv.count("/good") >= 1);
+    assert!(!matches!(j.outcome, Some(Outcome::Failed { .. })), "{j:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn credentials_in_links_never_reach_virustotal() {
+    use base64::Engine as _;
+    let vt = vt_server(0, 0).await;
+    let srv = RawServer::start(static_server(vec![("/x", b"x".to_vec(), vec![])])).await;
+    let e = env(EnvOptions {
+        vt_base: Some(format!("{}/api/v3/", vt.uri())),
+        vt_key: true,
+        ..Default::default()
+    });
+    let url = srv.url("/x").replace("http://", "http://alice:S3cretPw@");
+    let _ = e.run(&url).await;
+    for r in vt.received_requests().await.unwrap() {
+        let p = r.url.path().to_string();
+        assert!(!p.contains("S3cretPw"));
+        if let Some(id) = p.strip_prefix("/api/v3/urls/") {
+            let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(id)
+                .unwrap();
+            let decoded = String::from_utf8(decoded).unwrap();
+            assert!(
+                !decoded.contains("S3cretPw") && !decoded.contains("alice"),
+                "{decoded}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clean_file_is_kept_when_delivery_fails() {
+    require_clamav!();
+    let srv = RawServer::start(static_server(vec![("/f.bin", b"clean".to_vec(), vec![])])).await;
+    let e = env(EnvOptions::default());
+    // Fill every candidate name so delivery cannot find a free one.
+    std::fs::write(e.dest.join("f.bin"), b"o").unwrap();
+    for n in 1..1000 {
+        std::fs::write(e.dest.join(format!("f ({n}).bin")), b"o").unwrap();
+    }
+    let j = e.run(&srv.url("/f.bin")).await;
+    assert_eq!(j.outcome, Some(Outcome::Quarantined), "{j:#?}");
+    assert_eq!(j.verdict.as_ref().unwrap().level, VerdictLevel::Clean);
+    assert_eq!(
+        e.quarantine_files().len(),
+        2,
+        "the downloaded file must be kept"
+    );
+    // Free a name: the user can now release it without downloading again.
+    std::fs::remove_file(e.dest.join("f.bin")).unwrap();
+    e.engine.release(j.id).unwrap();
+    assert_eq!(std::fs::read(e.dest.join("f.bin")).unwrap(), b"clean");
+    assert_eq!(srv.count("/f.bin"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wrong_resume_offset_restarts_cleanly() {
+    require_clamav!();
+    let data: Vec<u8> = (0..300_000u32).map(|i| (i % 11) as u8).collect();
+    let d2 = data.clone();
+    let srv = RawServer::start(Arc::new(move |req: &Req, n| {
+        if req.range_from.is_some() {
+            // Lies: claims to resume but starts at 0.
+            let mut r = Resp::ok(d2.clone()).status(206);
+            r.headers.push((
+                "Content-Range".into(),
+                format!("bytes 0-{}/{}", d2.len() - 1, d2.len()),
+            ));
+            return r;
+        }
+        let mut r = Resp::ok(d2.clone());
+        if n == 0 {
+            r.cut_after = Some(50_000);
+        }
+        r
+    }))
+    .await;
+    let e = env(EnvOptions {
+        settings: Box::new(|s| s.max_retries = 4),
+        ..Default::default()
+    });
+    let j = e.run(&srv.url("/w.bin")).await;
+    assert!(
+        matches!(j.outcome, Some(Outcome::Delivered { .. })),
+        "{j:#?}"
+    );
+    assert_eq!(std::fs::read(e.dest.join("w.bin")).unwrap(), data);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn state_guards_and_destination_change() {
+    let srv = RawServer::start(static_server(vec![("/x", b"x".to_vec(), vec![])])).await;
+    let e = env(EnvOptions {
+        settings: Box::new(|s| s.clamav.clamscan_path = Some(missing_exe())),
+        ..Default::default()
+    });
+    let j = e.run(&srv.url("/x")).await;
+    assert_eq!(j.outcome, Some(Outcome::Quarantined));
+    // Invalid transitions are refused.
+    assert!(e.engine.force_download(j.id).is_err());
+    assert!(e.engine.retry(j.id).is_err());
+    // Re-pasting the same link while its file is in quarantine is ignored.
+    assert!(e.engine.submit(&srv.url("/x")).added.is_empty());
+    // Changing destination with a quarantined item is refused.
+    let other = e.dir.path().join("Other");
+    std::fs::create_dir_all(&other).unwrap();
+    assert!(e.engine.set_destination(&other).is_err());
+    // Rescan works (still not analyzed without ClamAV).
+    e.engine.rescan(j.id).unwrap();
+    let j = e.wait(j.id).await;
+    assert_eq!(j.outcome, Some(Outcome::Quarantined));
+    e.engine.discard(j.id).unwrap();
+    e.engine.clear_finished();
+    assert!(e.engine.set_destination(&other).is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn expired_checked_target_with_switched_chain_is_refused() {
+    // The checked target now answers 403 and the link redirects elsewhere:
+    // SafeFetch must refuse instead of downloading the unchecked file.
+    let vt = vt_server(0, 0).await;
+    let port = Arc::new(std::sync::Mutex::new(0u16));
+    let p2 = port.clone();
+    let srv = RawServer::start(Arc::new(move |req: &Req, n| {
+        let port = *p2.lock().unwrap();
+        match (req.path.as_str(), n) {
+            ("/start", 0) => Resp::redirect(&format!("http://localhost:{port}/good")),
+            ("/start", _) => Resp::redirect(&format!("http://localhost:{port}/evil")),
+            ("/good", 1) => Resp::ok(b"good payload".to_vec()),
+            ("/good", _) => Resp::ok(b"gone".to_vec()).status(403),
+            _ => Resp::ok(b"evil payload".to_vec()),
+        }
+    }))
+    .await;
+    *port.lock().unwrap() = srv.base.rsplit(':').next().unwrap().parse().unwrap();
+    let e = env(EnvOptions {
+        vt_base: Some(format!("{}/api/v3/", vt.uri())),
+        vt_key: true,
+        ..Default::default()
+    });
+    let j = e.run(&srv.url("/start")).await;
+    assert!(
+        matches!(&j.outcome, Some(Outcome::Failed { error, .. }) if error.contains("redirect target changed")),
+        "{j:#?}"
+    );
+    assert!(e.dest_files().is_empty());
+    assert!(e.quarantine_files().is_empty());
 }

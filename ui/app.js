@@ -203,9 +203,8 @@
     if (j.outcome && j.outcome.kind === "quarantined") {
       b("Re-scan", () => call("rescan_job", { id: j.id }), "ghost");
       b("Upload to VirusTotal…", async () => {
-        if (!confirm("Uploading sends the FILE itself to VirusTotal. Uploaded files can be downloaded by VirusTotal's partners and security researchers. Never upload private or confidential files.\n\nContinue?")) return;
-        if (!confirm("Last confirmation: upload this file to VirusTotal now? (free API: max 32 MiB)")) return;
-        const link = await call("upload_to_virustotal", { id: j.id, confirmed: true });
+        if (!confirm("Uploading sends the FILE itself to VirusTotal (free API: max 32 MiB). A system confirmation will follow. Continue?")) return;
+        const link = await call("upload_to_virustotal", { id: j.id });
         toast(`Uploaded. Report will appear at: ${link}`);
       }, "ghost");
       b("Delete file", async () => { if (confirm("Delete this file from quarantine?")) { await call("discard_job", { id: j.id }); } }, "danger");

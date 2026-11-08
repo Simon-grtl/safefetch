@@ -190,6 +190,11 @@ pub fn range_response(data: &[u8], req: &Req) -> Resp {
     }
 }
 
+/// An absolute path (on every OS) that does not exist.
+pub fn missing_exe() -> PathBuf {
+    std::env::temp_dir().join("safefetch-test-no-such-program")
+}
+
 pub fn find_clamscan() -> Option<PathBuf> {
     safefetch_core::scanners::clamav::find_executable("clamscan")
 }
@@ -252,6 +257,8 @@ pub fn env_in(dir: tempfile::TempDir, opts: EnvOptions) -> Env {
     s.clamav.mode = ClamAvMode::ClamscanOnly;
     s.clamav.database_dir = Some(write_test_db(dir.path()));
     s.clamav.clamscan_path = find_clamscan();
+    // Tests must not depend on the CI runner's Defender state.
+    s.use_defender = false;
     (opts.settings)(&mut s);
     if !config.join("settings.json").exists() {
         s.save(&config.join("settings.json")).unwrap();

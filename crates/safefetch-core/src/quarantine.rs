@@ -60,9 +60,13 @@ pub fn valid_id(id: &str) -> bool {
 impl Quarantine {
     /// Open (and create) the quarantine directory.
     pub fn open(root: PathBuf) -> Result<Self> {
+        let existed = root.is_dir();
         fsutil::create_private_dir(&root)?;
         #[cfg(windows)]
-        hide_on_windows(&root);
+        if !existed {
+            hide_on_windows(&root);
+        }
+        let _ = existed;
         Ok(Self { root })
     }
 
@@ -211,9 +215,12 @@ fn hide_on_windows(path: &Path) {
     // Best effort; absolute path so no PATH/app-dir hijacking is possible.
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
     let attrib = Path::new(&root).join("System32").join("attrib.exe");
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let _ = std::process::Command::new(attrib)
         .arg("+h")
         .arg(path)
+        .creation_flags(CREATE_NO_WINDOW)
         .status();
 }
 

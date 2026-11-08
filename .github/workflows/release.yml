@@ -43,7 +43,9 @@ jobs:
         shell: bash
         run: |
           if cargo tree -p safefetch -e normal --target all | grep -i "tauri-plugin-connector"; then exit 1; fi
-          grep -q "REPLACE_WITH" src-tauri/tauri.conf.json && { echo "::error::set plugins.updater.pubkey and endpoints in tauri.conf.json"; exit 1; } || true
+          if grep -qE "REPLACE_WITH|/OWNER/" src-tauri/tauri.conf.json; then
+            echo "::error::set plugins.updater.pubkey and the endpoints URL in tauri.conf.json"; exit 1
+          fi
 
       - uses: tauri-apps/tauri-action@v0
         env:

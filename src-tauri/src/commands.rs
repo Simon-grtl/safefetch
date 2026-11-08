@@ -65,17 +65,29 @@ pub async fn clear_finished(engine: State<'_, Engine>) -> CmdResult<()> {
     Ok(())
 }
 
-/// Explicit, user-confirmed upload (the UI asks twice). Never automatic.
+/// Explicit upload. The confirmation is a NATIVE dialog shown by Rust, so
+/// a compromised webview cannot trigger an upload on its own.
 #[tauri::command]
 pub async fn upload_to_virustotal(
+    app: AppHandle,
     engine: State<'_, Engine>,
     id: u64,
-    confirmed: bool,
 ) -> CmdResult<String> {
-    if !confirmed {
-        return Err(Error::Policy(
-            "upload requires explicit confirmation".into(),
-        ));
+    use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogKind};
+    let name = engine.job(id).map(|j| j.file_name).ok_or(Error::NotFound)?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .message(format!(
+            "Upload \"{name}\" to VirusTotal?\n\nThe FILE itself will be sent. Uploaded files can be downloaded by VirusTotal's partners and security researchers. Never upload private or confidential files."
+        ))
+        .title("Upload to VirusTotal")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom("Upload".into(), "Cancel".into()))
+        .show(move |ok| {
+            let _ = tx.send(ok);
+        });
+    if !rx.await.unwrap_or(false) {
+        return Err(Error::Cancelled);
     }
     engine.upload_to_virustotal(id).await
 }

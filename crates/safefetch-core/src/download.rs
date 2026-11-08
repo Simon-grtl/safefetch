@@ -141,6 +141,28 @@ fn validator(meta: &ItemMeta) -> Option<String> {
     }
 }
 
+/// Re-open a download. The already-checked final URL is requested directly,
+/// so the redirect chain cannot be steered to an unchecked host; if it has
+/// expired (4xx), the original link is followed again and the result is
+/// compared with the checked target by the caller (headers only, no body).
+async fn reopen(
+    ctx: &DownloadContext<'_>,
+    original: &Url,
+    meta: &ItemMeta,
+    offset: u64,
+) -> Result<(Response, Url)> {
+    let v = validator(meta);
+    if let Some(fin) = meta.final_url.as_deref().and_then(|u| Url::parse(u).ok()) {
+        if &fin != original {
+            match open(ctx, &fin, offset, v.as_deref()).await {
+                Err(Error::HttpStatus(s)) if (400..500).contains(&s) => {}
+                other => return other,
+            }
+        }
+    }
+    open(ctx, original, offset, v.as_deref()).await
+}
+
 /// Download (or resume) `meta` into quarantine, retrying transient failures.
 /// `first` is an already-open response for the original URL (offset 0).
 pub async fn download_resumable(
@@ -158,11 +180,13 @@ pub async fn download_resumable(
         let offset = q.data_len(&meta.id);
         let opened = match first.take() {
             Some(r) if offset == 0 => Ok(r),
-            _ => open(ctx, &original, offset, validator(meta).as_deref()).await,
+            _ => reopen(ctx, &original, meta, offset).await,
         };
         let result = match opened {
             Ok((resp, final_url)) => {
-                // The redirect target must not change between attempts.
+                // The redirect target must not change between attempts (scheme,
+                // host, port and path; the query may legitimately carry a fresh
+                // signed token on each redirect).
                 let same_host = meta
                     .final_url
                     .as_deref()
@@ -170,6 +194,8 @@ pub async fn download_resumable(
                     .is_none_or(|prev| {
                         prev.host_str() == final_url.host_str()
                             && prev.scheme() == final_url.scheme()
+                            && prev.port_or_known_default() == final_url.port_or_known_default()
+                            && prev.path() == final_url.path()
                     });
                 if !same_host {
                     Err(Error::Policy(
@@ -218,6 +244,14 @@ async fn write_body(
             let cr = header_str(&headers, CONTENT_RANGE)
                 .and_then(|v| parse_content_range(&v))
                 .ok_or_else(|| Error::Network("invalid Content-Range in 206 response".into()))?;
+            // A different strong ETag means another version of the file:
+            // never stitch two versions together.
+            if let (Some(prev), Some(now)) = (meta.etag.as_deref(), header_str(&headers, ETAG)) {
+                if !prev.starts_with("W/") && prev != now {
+                    truncate(&path, 0).await?;
+                    return Err(Error::Network("the remote file changed; restarting".into()));
+                }
+            }
             if cr.0 != offset {
                 truncate(&path, 0).await?;
                 return Err(Error::Network(

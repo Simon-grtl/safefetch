@@ -306,6 +306,20 @@ impl Engine {
             return Err(Error::InvalidSettings("not a folder".into()));
         }
         let mut s = self.settings();
+        if s.destination_dir.as_deref() != Some(dir.as_path()) {
+            let busy = self
+                .inner
+                .jobs
+                .lock()
+                .map(|jobs| jobs.values().any(|j| j.running || j.qid.is_some()))
+                .unwrap_or(true);
+            if busy {
+                return Err(Error::InvalidSettings(
+                    "finish or delete the downloads and quarantined files before changing the destination"
+                        .into(),
+                ));
+            }
+        }
         let qroot = s
             .quarantine_dir
             .clone()
@@ -368,10 +382,11 @@ impl Engine {
         let (requests, errors) = parse_links(text);
         let mut added = Vec::new();
         for req in requests {
-            // Same link already queued/running in this session: skip.
+            // Same link already queued/running, or its file is still in quarantine: skip.
             let dup = self.inner.jobs.lock().map(|jobs| {
-                jobs.values()
-                    .any(|j| j.request.url == req.url && j.snap.outcome.is_none())
+                jobs.values().any(|j| {
+                    j.request.url == req.url && (j.snap.outcome.is_none() || j.qid.is_some())
+                })
             });
             if dup.unwrap_or(false) {
                 continue;
@@ -403,7 +418,10 @@ impl Engine {
                     resumable: inner.has_partial(id),
                 },
                 Err(e) => {
-                    let resumable = e.is_transient() && inner.has_partial(id);
+                    // A finished download is never thrown away because of a later
+                    // error (scan, delivery…): "retry" goes straight to analysis.
+                    let complete = inner.download_complete(id);
+                    let resumable = (complete || e.is_transient()) && inner.has_partial(id);
                     if !resumable {
                         inner.drop_partial(id);
                     }
@@ -491,7 +509,9 @@ impl Engine {
         let q = self.inner.quarantine(&s)?;
         let meta = q.load_meta(&qid)?;
         let path = delivery::deliver(&q.data_path(&qid)?, &dest, &meta.file_name)?;
-        q.remove(&qid)?;
+        if let Err(e) = q.remove(&qid) {
+            tracing::warn!("could not remove quarantine sidecar: {e}");
+        }
         self.inner.record_history(
             &meta,
             level.unwrap_or(VerdictLevel::NotAnalyzed),
@@ -822,6 +842,20 @@ impl Inner {
         }
     }
 
+    fn download_complete(&self, id: u64) -> bool {
+        let qid = self
+            .jobs
+            .lock()
+            .ok()
+            .and_then(|j| j.get(&id).and_then(|j| j.qid.clone()));
+        match (qid, self.quarantine(&self.settings())) {
+            (Some(qid), Ok(q)) => q
+                .load_meta(&qid)
+                .is_ok_and(|m| m.state != ItemState::Downloading),
+            _ => false,
+        }
+    }
+
     fn drop_partial(&self, id: u64) {
         let qid = self
             .jobs
@@ -893,7 +927,7 @@ impl Inner {
             };
         consider(
             "URL",
-            vt.lookup_url(url.as_str()).await,
+            vt.lookup_url(vt_safe_url(url).as_str()).await,
             s.url_block_threshold,
         );
         if let Some(url::Host::Domain(d)) = url.host() {
@@ -1106,8 +1140,11 @@ impl Inner {
                             });
                         }
                     }
-                    _ => first = Some((resp, final_url)),
+                    _ => first = Some((resp, final_url.clone())),
                 }
+                // Pin the checked target: a re-open that lands elsewhere is refused.
+                meta.final_url = Some(final_url.to_string());
+                q.save_meta(&meta)?;
             }
             download::download_resumable(&ctx, &q, &mut meta, first).await?;
             drop(guard);
@@ -1179,7 +1216,19 @@ impl Inner {
         };
         let clam = clamav::scan(&s.clamav, &path).await;
         let def = if cfg!(windows) && s.use_defender {
-            defender::scan(&path).await
+            match defender::scan(&path).await {
+                // Not installed / disabled (e.g. third-party antivirus): it is an
+                // optional extra engine, so it must not block a Clean verdict.
+                EngineResult::Unavailable(why) => {
+                    self.update(id, |j| {
+                        j.snap
+                            .warnings
+                            .push(format!("Microsoft Defender not used: {why}"))
+                    });
+                    EngineResult::Skipped
+                }
+                other => other,
+            }
         } else {
             EngineResult::Skipped
         };
@@ -1203,8 +1252,24 @@ impl Inner {
         // ---- 4. act on the verdict ----
         match verdict.level {
             VerdictLevel::Clean => {
-                let delivered = delivery::deliver(&path, &dest, &meta.file_name)?;
-                q.remove(&meta.id)?;
+                let delivered = match delivery::deliver(&path, &dest, &meta.file_name) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        // Keep the (clean) file: never lose a finished download.
+                        meta.state = ItemState::AwaitingDecision;
+                        meta.verdict = Some(verdict);
+                        q.save_meta(&meta)?;
+                        self.update(id, |j| {
+                            j.snap.warnings.push(format!(
+                                "Clean, but delivery failed ({e}). The file is kept in quarantine; use “Release”."
+                            ))
+                        });
+                        return Ok(Outcome::Quarantined);
+                    }
+                };
+                if let Err(e) = q.remove(&meta.id) {
+                    tracing::warn!("could not remove quarantine sidecar: {e}");
+                }
                 self.record_history(&meta, VerdictLevel::Clean, Some(delivered.clone()));
                 self.update(id, |j| j.qid = None);
                 Ok(Outcome::Delivered {
@@ -1248,6 +1313,16 @@ impl Ord for LinkStatus {
 }
 
 // ---------------------------------------------------------------- helpers --
+
+/// The URL as sent to VirusTotal: never the user name, password or fragment.
+/// (The query string is kept: VirusTotal identifies URLs by their full text.)
+pub fn vt_safe_url(url: &Url) -> Url {
+    let mut u = url.clone();
+    let _ = u.set_username("");
+    let _ = u.set_password(None);
+    u.set_fragment(None);
+    u
+}
 
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };

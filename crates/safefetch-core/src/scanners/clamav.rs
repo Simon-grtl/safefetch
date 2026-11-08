@@ -117,7 +117,6 @@ const TRUNCATION_MARKERS: &[&str] = &[
     "exceeded",
     "exceeds max",
     "too large",
-    "skipping",
 ];
 
 pub fn truncation_marker(line: &str) -> Option<String> {
@@ -174,6 +173,7 @@ pub fn parse_clamscan_output(
 pub async fn scan_with_clamscan(exe: &Path, s: &ClamAvSettings, file: &Path) -> EngineResult {
     use tokio::io::AsyncBufReadExt;
     let mut cmd = tokio::process::Command::new(exe);
+    crate::fsutil::no_console_window(&mut cmd);
     cmd.args(clamscan_args(s, file))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -513,6 +513,7 @@ pub async fn version(s: &ClamAvSettings) -> Option<String> {
         .clone()
         .or_else(|| find_executable("clamscan"))?;
     let mut cmd = tokio::process::Command::new(exe);
+    crate::fsutil::no_console_window(&mut cmd);
     cmd.arg("--version").stdin(Stdio::null()).kill_on_drop(true);
     if let Some(db) = &s.database_dir {
         let mut d = OsString::from("--database=");
@@ -535,6 +536,7 @@ pub async fn update_signatures(s: &ClamAvSettings) -> Result<String, String> {
         .or_else(|| find_executable("freshclam"))
         .ok_or("freshclam not found")?;
     let mut cmd = tokio::process::Command::new(exe);
+    crate::fsutil::no_console_window(&mut cmd);
     cmd.arg("--stdout").stdin(Stdio::null()).kill_on_drop(true);
     let out = tokio::time::timeout(Duration::from_secs(900), cmd.output())
         .await

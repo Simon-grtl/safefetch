@@ -103,6 +103,17 @@ pub fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// Never flash a console window when the GUI app starts a console program
+/// (clamscan, freshclam, MpCmdRun) on Windows.
+pub fn no_console_window(cmd: &mut tokio::process::Command) {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let _ = cmd;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

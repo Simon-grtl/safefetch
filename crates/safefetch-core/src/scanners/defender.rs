@@ -77,6 +77,7 @@ pub async fn scan(file: &Path) -> EngineResult {
         return EngineResult::Unavailable("Microsoft Defender (MpCmdRun.exe) not found".into());
     };
     let mut cmd = tokio::process::Command::new(exe);
+    crate::fsutil::no_console_window(&mut cmd);
     cmd.args(["-Scan", "-ScanType", "3", "-File"])
         .arg(file)
         .arg("-DisableRemediation")
