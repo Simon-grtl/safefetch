@@ -18,7 +18,7 @@ Review every change against these rules. Any violation is a blocker.
 
 ## Verdict
 11. A file is **Clean** only if at least one local engine completed AND no engine/VirusTotal signal says otherwise (`verdict::decide`). Any limit, truncation, encryption, error or missing engine ⇒ Not analyzed.
-12. clamscan always runs with raised limits, `--alert-exceeds-max=yes`, `--alert-encrypted=yes` and `--debug`; its stderr is scanned for truncation/extraction-failure markers (any ⇒ Not analyzed). Files ≥ 2 GiB are Not analyzed (libclamav limit). clamscan is preferred; clamd is a fallback only, requires a clamd.conf proving `AlertExceedsMax yes`, `AlertEncrypted yes`, `MaxFileSize ≥ 2047M`, sufficient `StreamMaxLength`, no `Scan* no`, and its "clean" is never accepted for containers (`looks_like_container`).
+12. Before ClamAV, `archive::zip_problem` must pass (else Not analyzed). Any `LibClamAV Error:` line ⇒ Not analyzed. clamscan always runs with raised limits, `--alert-exceeds-max=yes`, `--alert-encrypted=yes` and `--debug`; its stderr is scanned for truncation/extraction-failure markers (any ⇒ Not analyzed). Files ≥ 2 GiB are Not analyzed (libclamav limit). clamscan is preferred; clamd is a fallback only, requires a clamd.conf proving `AlertExceedsMax yes`, `AlertEncrypted yes`, `MaxFileSize ≥ 2047M`, sufficient `StreamMaxLength`, no `Scan* no`, and its "clean" is never accepted for containers (`looks_like_container`).
 13. Thresholds come from settings; never hard-code new ones.
 
 ## Secrets and privacy

@@ -161,43 +161,54 @@ pub fn check_redirect(from: &Url, to: &Url, public_only: bool) -> Result<()> {
 /// otherwise resolve intranet names such as `intranet.corp` — audit F3).
 /// Residual risk: a proxy may resolve the name differently (split DNS).
 pub async fn ensure_public_target(url: &Url) -> Result<()> {
+    let refuse = |h: &str| {
+        Err(Error::Policy(format!(
+            "redirect to a private or internal host ({h}) refused"
+        )))
+    };
     let host = match url.host() {
-        Some(Host::Domain(d)) => d.to_string(),
+        Some(Host::Domain(d)) => d.trim_end_matches('.').to_ascii_lowercase(),
         Some(Host::Ipv4(ip)) => {
             return if is_public_v4(ip) {
                 Ok(())
             } else {
-                Err(Error::Policy(
-                    "redirect to a private address refused".into(),
-                ))
+                refuse(&ip.to_string())
             }
         }
         Some(Host::Ipv6(ip)) => {
             return if is_public_v6(ip) {
                 Ok(())
             } else {
-                Err(Error::Policy(
-                    "redirect to a private address refused".into(),
-                ))
+                refuse(&ip.to_string())
             }
         }
         None => return Err(Error::Policy("redirect without host".into())),
     };
-    let port = url.port_or_known_default().unwrap_or(443);
-    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
-        .await
-        .map_err(|_| {
-            Error::Policy(format!(
-                "redirect to a host that does not resolve publicly ({host}) refused"
-            ))
-        })?
-        .collect();
-    if addrs.is_empty() || addrs.iter().any(|a| !is_public_ip(a.ip())) {
-        return Err(Error::Policy(format!(
-            "redirect to a private or internal host ({host}) refused"
-        )));
+    // Names that are internal by convention, whatever DNS says.
+    const INTERNAL_SUFFIXES: &[&str] = &[
+        ".internal",
+        ".local",
+        ".localhost",
+        ".lan",
+        ".home",
+        ".corp",
+        ".intranet",
+        ".private",
+        ".home.arpa",
+    ];
+    if !host.contains('.') || INTERNAL_SUFFIXES.iter().any(|s| host.ends_with(s)) {
+        return refuse(&host);
     }
-    Ok(())
+    let port = url.port_or_known_default().unwrap_or(443);
+    let resolved = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map(|a| a.collect::<Vec<SocketAddr>>());
+    match resolved {
+        Ok(addrs) if addrs.iter().any(|a| !is_public_ip(a.ip())) => refuse(&host),
+        // Unresolvable locally: typical of networks where only the proxy
+        // resolves names (re-audit regression). Allowed; the proxy decides.
+        _ => Ok(()),
+    }
 }
 
 /// A URL safe to show in the UI or logs: scheme, host and path only.
@@ -318,9 +329,17 @@ mod tests {
         // Audit F3: even through a proxy, internal names are refused.
         assert!(ensure_public_target(&u("http://localhost/")).await.is_err());
         assert!(ensure_public_target(&u("http://10.0.0.1/")).await.is_err());
-        assert!(ensure_public_target(&u("http://intranet.invalid/"))
+        assert!(ensure_public_target(&u("http://metadata.google.internal/"))
             .await
             .is_err());
+        assert!(ensure_public_target(&u("http://intranet.corp/"))
+            .await
+            .is_err());
+        assert!(ensure_public_target(&u("http://nas/")).await.is_err());
+        // Proxy-only DNS: an unresolvable public-looking name is not refused.
+        assert!(ensure_public_target(&u("http://cdn.example.invalid/"))
+            .await
+            .is_ok());
         assert!(ensure_public_target(&u("http://8.8.8.8/")).await.is_ok());
     }
 }

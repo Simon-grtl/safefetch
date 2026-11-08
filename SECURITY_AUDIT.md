@@ -31,10 +31,19 @@ Re-run the original plugins when available; this document lists what they should
 | M5 | Code review | Major | Console windows flashing on Windows | `CREATE_NO_WINDOW` on every child process; `attrib` only at creation | — (Windows) |
 | m1–m9 | Code review | Minor | destination change stranding quarantine; re-paste duplicates; stale state after partial failures; resume across file versions (ETag); broad markers; `\\?\` paths; release guard; Defender in tests; upload confirmation only in JS | Refusal while items pending; dedupe incl. quarantine; log-and-continue; ETag check on 206; markers narrowed; `dunce`; guard on `/OWNER/`; tests disable Defender; **native Rust confirmation dialog** for uploads | `state_guards_and_destination_change`, `wrong_resume_offset_restarts_cleanly` |
 
-The fixes were then re-audited by the attacker auditor (section "Re-audit").
+## Re-audit of the fixes (same attacker auditor, PoCs re-run, header fuzzing)
+
+| Fix | Re-audit result | Follow-up fix | Test |
+|---|---|---|---|
+| F1 | **Incomplete**: ZIP with local-header flag bit 13 ("masked"), local method 0 or local csize 0/1 disagreeing with the central directory, and a truncated `.xz` (only a `LibClamAV Error:` line) were still delivered Clean | (1) New `archive.rs`: structural ZIP check independent of ClamAV — every central entry must have an identical local header (flags, method, CRC, sizes, name; data-descriptor case handled), only methods ClamAV unpacks, no ZIP64/encrypted/multi-disk, SFX prefixes handled; (2) any `LibClamAV Error:` line ⇒ Not analyzed; (3) marker `unusable masked data`; (4) ClamAV builds without RAR support (Debian/Ubuntu) ⇒ RAR content Not analyzed | `reaudit_zip_and_xz_evasions_are_never_clean`, `audit_evasion_variants_are_flagged` |
+| F2 | Verified; gap: ZIP after a text prefix not seen as a container by clamd path | Container sniffing also looks for a ZIP end-of-central-directory near the end of the file | `container_sniffing` + archive tests |
+| F3 | Internal names blocked, but **regression**: networks where only the proxy resolves names broke every redirect | Names internal by convention (`.internal`, `.corp`, `.local`, single label…) and names resolving to private IPs are refused; names that do not resolve locally are allowed (proxy decides) | `redirect_targets_must_resolve_publicly` |
+| F4 | Mostly verified; U+1CBC, U+180B, U+1BCA0, U+1D159 and `facture.pdf_.exe` still passed; `.msh`/`.cab` missing | Full Default_Ignorable_Code_Point + Cf ranges + blank-looking chars; decoy check ignores `_ - . space` filler; extensions added | `reaudit_padding_variants` |
+
+Verified in the real GUI (release build): a clean file is delivered, EICAR in a ZIP is deleted, the LZMA evasion ZIP stays in quarantine as "Not analyzed".
 
 ## Residual risks (accepted, documented)
-1. **Unknown archive failure modes.** Detection of "ClamAV skipped this" relies on libclamav debug messages; formats or messages not yet seen (other RAR/7z corruptions, future ClamAV versions) may slip through. Mitigation: markers are checked in CI against crafted samples; re-check at each ClamAV major version.
+1. **Nested malformed archives / unknown failure modes.** The structural ZIP check covers the top-level file only; a malformed ZIP *inside* a valid one relies on ClamAV debug markers and error lines. Detection of "ClamAV skipped this" relies on libclamav debug messages; formats or messages not yet seen (other RAR/7z corruptions, future ClamAV versions) may slip through. Mitigation: markers are checked in CI against crafted samples; re-check at each ClamAV major version.
 2. **`--debug` with the full official signature database** was not measured here (only a one-signature test DB was available). Expected impact: more stderr to stream (bounded memory) and possibly false "Not analyzed" — the safe direction.
 3. **Files ≥ 2 GiB** are never scanned by ClamAV (libclamav limit): always Not analyzed.
 4. **Proxy with split DNS**: if the proxy resolves a name differently from the local resolver, the redirect guard can be wrong.

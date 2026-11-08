@@ -120,6 +120,8 @@ const EXECUTABLE_EXTENSIONS: &[&str] = &[
     "applescript",
     "tool",
     // Linux / cross-platform
+    "msh",
+    "cab",
     "dmg",
     "jnlp",
     "xpi",
@@ -155,27 +157,26 @@ pub fn is_executable_extension(ext: &str) -> bool {
     EXECUTABLE_EXTENSIONS.contains(&ext.as_str())
 }
 
+/// Unicode Default_Ignorable_Code_Point + format (Cf) characters + characters
+/// that render as blank. Covers the bidi overrides (RTLO) and every invisible
+/// filler an attacker can use to push the real extension out of view.
 fn is_bidi_or_invisible(c: char) -> bool {
     matches!(c,
-        '\u{00AD}'                      // soft hyphen
-        | '\u{061C}'                    // Arabic letter mark
-        | '\u{115F}' | '\u{1160}'       // Hangul fillers
-        | '\u{180E}'                    // Mongolian vowel separator
-        | '\u{200B}'..='\u{200F}'       // zero-width chars, LRM, RLM
-        | '\u{202A}'..='\u{202E}'       // LRE, RLE, PDF, LRO, RLO (RTLO)
-        | '\u{2060}'..='\u{2064}'       // word joiner, invisible operators
-        | '\u{2066}'..='\u{206F}'       // isolates and deprecated format chars
-        | '\u{034F}'                    // combining grapheme joiner
-        | '\u{17B4}' | '\u{17B5}'       // Khmer invisible vowels
-        | '\u{2800}'                    // Braille blank (renders as a space)
-        | '\u{3164}'                    // Hangul filler
-        | '\u{FFFC}'                    // object replacement character
-        | '\u{1D173}'..='\u{1D17A}'     // musical formatting chars
-        | '\u{FE00}'..='\u{FE0F}'       // variation selectors
-        | '\u{FEFF}'                    // BOM / ZWNBSP
-        | '\u{FFA0}'                    // halfwidth Hangul filler
-        | '\u{FFF9}'..='\u{FFFB}'       // interlinear annotations
-        | '\u{E0000}'..='\u{E007F}'     // tag characters
+        // --- Default_Ignorable_Code_Point (Unicode DerivedCoreProperties) ---
+        '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{115F}' | '\u{1160}'
+        | '\u{17B4}' | '\u{17B5}' | '\u{180B}'..='\u{180F}'
+        | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}'
+        | '\u{3164}' | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{FFA0}' | '\u{FFF0}'..='\u{FFF8}'
+        | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}' | '\u{E0000}'..='\u{E0FFF}'
+        // --- other format (Cf) characters ---
+        | '\u{0600}'..='\u{0605}' | '\u{06DD}' | '\u{070F}' | '\u{0890}' | '\u{0891}' | '\u{08E2}'
+        | '\u{FFF9}'..='\u{FFFB}' | '\u{110BD}' | '\u{110CD}' | '\u{13430}'..='\u{1343F}'
+        // --- visible-as-blank characters ---
+        | '\u{2800}'    // Braille pattern blank
+        | '\u{FFFC}'    // object replacement character
+        | '\u{1CBC}'    // Georgian filler (blank glyph)
+        | '\u{1D159}'   // musical symbol null notehead
+        | '\u{2028}' | '\u{2029}' // line / paragraph separators
     )
 }
 
@@ -255,6 +256,9 @@ pub fn sanitize_filename(raw: &str) -> SanitizedName {
     if let Some((stem, ext)) = name.rsplit_once('.') {
         if is_executable_extension(ext) {
             out.warn(NameWarning::ExecutableExtension);
+            // Ignore filler between the decoy and the real extension
+            // ("facture.pdf_.exe", "facture.pdf - .exe").
+            let stem = stem.trim_end_matches(['_', ' ', '.', '-']);
             if let Some((inner_stem, inner_ext)) = stem.rsplit_once('.') {
                 if DECOY_EXTENSIONS.contains(&inner_ext.to_ascii_lowercase().as_str()) {
                     out.warn(NameWarning::DeceptiveDoubleExtension);
@@ -600,5 +604,22 @@ mod tests {
         assert!(r.warnings.contains(&NameWarning::DeceptiveDoubleExtension));
         let r = sanitize_filename("invoice.pdf.dmg");
         assert_eq!(r.name, "invoice_pdf.dmg");
+    }
+
+    #[test]
+    fn reaudit_padding_variants() {
+        for pad in [
+            "\u{1CBC}",
+            "\u{180B}",
+            "\u{1BCA0}",
+            "\u{1D159}",
+            "_\u{2800}",
+            "_",
+        ] {
+            let r = sanitize_filename(&format!("facture.pdf{pad}.exe"));
+            assert_eq!(r.name, "facture_pdf.exe", "{pad:?}");
+            assert!(r.warnings.contains(&NameWarning::DeceptiveDoubleExtension));
+        }
+        assert!(is_executable_extension("msh") && is_executable_extension("cab"));
     }
 }

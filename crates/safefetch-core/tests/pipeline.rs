@@ -842,3 +842,54 @@ async fn archives_clamav_cannot_unpack_are_never_clean() {
         e.dest_files()
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reaudit_zip_and_xz_evasions_are_never_clean() {
+    // Re-audit of F1: masked-header flag, local method/size disagreeing with
+    // the central directory, a self-extractor-style prefix, and a truncated
+    // .xz that still decompresses partially with `xz -dc`.
+    require_clamav!();
+    let base = zip_of(&[("eicar.com", EICAR)]);
+    let local = find(&base, b"PK\x03\x04");
+    let mut masked = base.clone();
+    masked[local + 7] |= 0x20; // general-purpose flag bit 13
+    let mut method0 = base.clone();
+    put(&mut method0, local + 8, 0, 2);
+    let mut csize0 = base.clone();
+    put(&mut csize0, local + 18, 0, 4);
+    let mut prefixed = b"#!/bin/sh\nexit 0\n".repeat(60);
+    prefixed.extend_from_slice(&masked);
+    let truncated_xz = hex_decode("fd377a585a000004e6d6b4460200210116000000742fe5a301004358354f2150254041505b345c505a58353428505e2937434329377d2445494341522d5354414e444152442d414e544956495255532d544553542d46494c452124482b482a00faab49d4013391b6");
+    let srv = RawServer::start(static_server(vec![
+        ("/masked.zip", masked, vec![]),
+        ("/m0.zip", method0, vec![]),
+        ("/c0.zip", csize0, vec![]),
+        ("/sfx.bin", prefixed, vec![]),
+        ("/t.xz", truncated_xz, vec![]),
+    ]))
+    .await;
+    let e = env(EnvOptions::default());
+    for p in ["/masked.zip", "/m0.zip", "/c0.zip", "/sfx.bin", "/t.xz"] {
+        let j = e.run(&srv.url(p)).await;
+        let level = j.verdict.as_ref().map(|v| v.level);
+        assert!(
+            matches!(
+                level,
+                Some(VerdictLevel::NotAnalyzed) | Some(VerdictLevel::Dangerous)
+            ),
+            "{p}: {j:#?}"
+        );
+    }
+    assert!(
+        e.dest_files().is_empty(),
+        "nothing may be delivered: {:?}",
+        e.dest_files()
+    );
+}
+
+fn hex_decode(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}

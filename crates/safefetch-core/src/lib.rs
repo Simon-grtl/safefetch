@@ -2,6 +2,7 @@
 //!
 //! This crate has no GUI dependency; the Tauri app is a thin adapter.
 
+pub mod archive;
 pub mod delivery;
 pub mod download;
 pub mod engine;

@@ -123,6 +123,7 @@ const TRUNCATION_MARKERS: &[&str] = &[
     "unsupported method",
     "extraction failed",
     "stream out of file",
+    "unusable masked data",
     "decompression failed",
 ];
 
@@ -208,9 +209,25 @@ pub async fn scan_with_clamscan(exe: &Path, s: &ClamAvSettings, file: &Path) -> 
             let mut lines = tokio::io::BufReader::new(stderr).lines();
             let mut truncated: Option<String> = None;
             let mut tail: Vec<String> = Vec::new();
+            let mut unrar_missing = false;
             while let Ok(Some(line)) = lines.next_line().await {
+                if line.contains("unrar support unavailable") {
+                    unrar_missing = true;
+                }
                 if truncated.is_none() {
-                    truncated = truncation_marker(&line);
+                    truncated = truncation_marker(&line)
+                        // Any libclamav error means part of the data was not
+                        // scanned (re-audit: truncated .xz only logs an Error).
+                        .or_else(|| {
+                            line.starts_with("LibClamAV Error:")
+                                .then(|| line.chars().take(160).collect())
+                        })
+                        // Some ClamAV builds ship without RAR support (e.g.
+                        // Debian/Ubuntu): RAR content would be skipped silently.
+                        .or_else(|| {
+                            (unrar_missing && line.contains("Recognized RAR file"))
+                                .then(|| "this ClamAV build cannot unpack RAR archives".to_string())
+                        });
                 }
                 if !line.starts_with("LibClamAV debug") {
                     tail.push(line);
@@ -506,6 +523,16 @@ pub async fn scan(s: &ClamAvSettings, file: &Path) -> EngineResult {
             s.max_filesize_mib
         ));
     }
+    // Structural check independent of ClamAV (re-audit F1): ZIPs whose local
+    // headers disagree with the central directory are skipped by ClamAV.
+    if let Some(problem) = {
+        let p = file.to_path_buf();
+        tokio::task::spawn_blocking(move || crate::archive::zip_problem(&p))
+            .await
+            .unwrap_or(Some("archive check failed".into()))
+    } {
+        return EngineResult::NotScanned(format!("ZIP structure not scannable: {problem}"));
+    }
     match choose_backend(s, size) {
         Backend::Clamd { address } => {
             // clamd gives no way to know whether every archive member was
@@ -580,6 +607,12 @@ pub fn looks_like_container(file: &Path) -> bool {
         || starts(b"{\\rtf");
     if magic {
         return true;
+    }
+    // ZIP appended to other data (self-extractor style): EOCD near the end.
+    if let Ok(len) = f.metadata().map(|m| m.len()) {
+        if len >= 22 && matches!(crate::archive::find_eocd(&mut f, len), Ok(Some(_))) {
+            return true;
+        }
     }
     // Apple disk image: "koly" trailer in the last 512 bytes.
     let mut tail = [0u8; 4];
