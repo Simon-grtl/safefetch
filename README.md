@@ -24,14 +24,16 @@ paste links ─► VirusTotal link check ─► download to quarantine ─► SH
 - A program already running on your computer with your rights could tamper with files; SafeFetch does not sandbox the OS.
 
 ## Install
-See [docs/INSTALL.md](docs/INSTALL.md). In short: install ClamAV, update its signatures, install SafeFetch, choose a destination folder, optionally add a free VirusTotal API key.
+Windows, macOS, Linux (Debian/Ubuntu, Fedora, **Arch Linux, CachyOS** via the PKGBUILD in `packaging/arch`, or AppImage). See [docs/INSTALL.md](docs/INSTALL.md). In short: install ClamAV, update its signatures, install SafeFetch, choose a destination folder, optionally add a free VirusTotal API key.
 
 ## Build from source
 ```bash
 # Linux deps (Debian/Ubuntu)
 sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libdbus-1-dev clamav
+# Linux deps (Arch Linux / CachyOS)
+sudo pacman -S --needed base-devel rust webkit2gtk-4.1 gtk3 dbus clamav
 cargo install tauri-cli --version "^2" --locked
-cargo test --workspace            # 90+ tests incl. EICAR, zip bombs, resume, redirects
+cargo test --workspace            # 100+ tests incl. EICAR, zip bombs, resume, redirects
 cargo tauri dev                   # run in development
 cargo tauri build                 # installers in target/release/bundle/
 ```

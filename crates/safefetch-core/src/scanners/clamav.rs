@@ -152,9 +152,11 @@ pub fn truncation_marker(line: &str) -> Option<String> {
 pub fn explain_error(line: &str) -> String {
     let short: String = line.chars().take(160).collect();
     if line.contains("fmap_get_hash") || line.contains("error calculating") {
-        // Seen on Homebrew ClamAV 1.5.4 built against OpenSSL 4 (Nov 2026):
-        // ClamAV cannot hash files, so hash signatures never match.
-        format!("{short} — this ClamAV installation cannot compute file hashes (known problem with Homebrew ClamAV built on OpenSSL 4). Install the official ClamAV package from clamav.net instead.")
+        // Seen on Homebrew ClamAV 1.5.4 built against OpenSSL 4 (Nov 2026),
+        // expected on distributions rebuilding ClamAV on OpenSSL 4 (Arch Linux
+        // and CachyOS have a rebuild in staging): ClamAV cannot hash files, so
+        // hash signatures never match. Cisco-Talos/clamav#1887.
+        format!("{short} — this ClamAV build cannot compute file hashes (known incompatibility between ClamAV 1.5 and OpenSSL 4). macOS: install the official ClamAV package from clamav.net. Linux: wait for a fixed clamav package, or use the official ClamAV package.")
     } else {
         short
     }

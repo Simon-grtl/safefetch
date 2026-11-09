@@ -1,0 +1,58 @@
+# Maintainer: Simon-grtl <https://github.com/Simon-grtl>
+#
+# Arch Linux / CachyOS package built from source.
+#   makepkg -si           # build and install
+# Before publishing a new version on the AUR: bump pkgver, then run
+#   updpkgsums && makepkg --printsrcinfo > .SRCINFO
+
+pkgname=safefetch
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Download files into quarantine, scan them (ClamAV, VirusTotal) and deliver only clean files"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Simon-grtl/safefetch"
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3' 'glib2' 'dbus' 'gcc-libs' 'glibc' 'clamav')
+makedepends=('cargo')
+optdepends=(
+  'kwallet: store the VirusTotal API key on KDE Plasma (CachyOS default)'
+  'gnome-keyring: store the VirusTotal API key on GNOME and other desktops'
+)
+# ring (TLS) builds C/assembly; makepkg's LTO flags break it.
+options=('!lto' '!debug')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+# Replaced by the real checksum with `updpkgsums` once the v$pkgver tag exists.
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p safefetch --features custom-protocol
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # Unit tests only: the end-to-end tests need network sockets and ClamAV.
+  cargo test --frozen -p safefetch-core --lib
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/safefetch "$pkgdir/usr/bin/safefetch"
+  install -Dm644 packaging/linux/io.github.safefetch.app.desktop \
+    "$pkgdir/usr/share/applications/io.github.safefetch.app.desktop"
+  install -Dm644 src-tauri/icons/32x32.png "$pkgdir/usr/share/icons/hicolor/32x32/apps/safefetch.png"
+  install -Dm644 src-tauri/icons/128x128.png "$pkgdir/usr/share/icons/hicolor/128x128/apps/safefetch.png"
+  install -Dm644 src-tauri/icons/128x128@2x.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/safefetch.png"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md docs/INSTALL.md -t "$pkgdir/usr/share/doc/$pkgname/"
+}

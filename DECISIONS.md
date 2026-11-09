@@ -61,3 +61,10 @@ choice changes; keep the "why" and the alternative that was rejected.
 ### Packaging
 - `tauri-action` builds .msi + NSIS .exe (Windows), universal .dmg/.app (macOS), .deb/.rpm/AppImage (Linux); `createUpdaterArtifacts` + `latest.json`. Updater public key must be set in `tauri.conf.json`; the release workflow refuses to run while the placeholder is present.
 - License: MIT.
+
+## 2026-11-09 — Arch Linux & CachyOS support
+- **PKGBUILD from source** (`packaging/arch/PKGBUILD`): `cargo build --release --features custom-protocol` (new feature forwarding to `tauri/custom-protocol`, so no Tauri CLI or Node is needed), Arch Rust packaging guidelines (`cargo fetch --locked` / `--frozen`), `options=(!lto)` because makepkg's LTO flags break ring's C code. Desktop file + hicolor icons. Built with `makepkg` during development and in CI.
+- **CI:** Arch Linux (`archlinux:latest`) and CachyOS (`cachyos/cachyos:latest`) containers run the full test suite and build + install the package. A ClamAV self-check first verifies the distro's ClamAV can detect EICAR; if not (expected once ClamAV is rebuilt on OpenSSL 4, Cisco-Talos/clamav#1887), ClamAV tests are skipped with a warning instead of blocking CI on an upstream bug.
+- **WebKitGTK DMA-BUF renderer disabled by default on Linux** (`WEBKIT_DISABLE_DMABUF_RENDERER=1` unless the user sets it): verified to cause a blank window without a usable GPU; also the usual blank-window cause with NVIDIA/Wayland. Negligible cost for this UI.
+- **In-app updater only for the AppImage on Linux**; pacman/apt/dnf installs are updated by the package manager (the updater cannot replace files owned by a package).
+- Keyring: KWallet (KDE/CachyOS) or gnome-keyring through Secret Service, still no plaintext fallback.

@@ -1367,8 +1367,9 @@ pub fn install_help() -> Vec<String> {
         _ => vec![
             "Debian/Ubuntu: sudo apt install clamav clamav-freshclam".into(),
             "Fedora: sudo dnf install clamav clamav-update — then sudo freshclam".into(),
-            "Arch: sudo pacman -S clamav — then sudo freshclam".into(),
+            "Arch Linux / CachyOS: sudo pacman -S clamav && sudo freshclam && sudo systemctl enable --now clamav-freshclam.service".into(),
             "Signatures are kept up to date by the clamav-freshclam service (systemctl status clamav-freshclam).".into(),
+            "To save a VirusTotal key you need a keyring service: KWallet on KDE Plasma (CachyOS default), gnome-keyring elsewhere.".into(),
         ],
     }
 }

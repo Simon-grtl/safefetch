@@ -37,3 +37,7 @@ tauri-plugin-connector = { version = "0.17", optional = true }
 
 [features]
 dev-connector = ["dep:tauri-plugin-connector"]
+# Embed the UI in the binary. `cargo tauri build` enables it automatically;
+# plain `cargo build --release --features custom-protocol` (used by the
+# Arch Linux PKGBUILD) needs it explicitly.
+custom-protocol = ["tauri/custom-protocol"]

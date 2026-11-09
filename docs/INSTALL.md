@@ -29,9 +29,12 @@ sudo /usr/local/clamav/bin/freshclam
 sudo apt install clamav clamav-freshclam      # the clamav-freshclam service updates signatures daily
 # Fedora
 sudo dnf install clamav clamav-update && sudo freshclam
-# Arch
-sudo pacman -S clamav && sudo freshclam
+# Arch Linux / CachyOS
+sudo pacman -S clamav
+sudo freshclam
+sudo systemctl enable --now clamav-freshclam.service   # daily signature updates
 ```
+> **Arch / CachyOS and OpenSSL 4.** Arch is rebuilding its packages on OpenSSL 4 (`clamav 1.5.4-2` is in staging as of November 2026). ClamAV 1.5 does not work with OpenSSL 4 yet ([Cisco-Talos/clamav#1887](https://github.com/Cisco-Talos/clamav/issues/1887)). If that update reaches you before a fix, SafeFetch will show every file as "Not analyzed" with the message "this ClamAV build cannot compute file hashes": nothing is wrongly marked Clean, but nothing can be scanned until a fixed `clamav` package is released.
 On Linux the system service owns the signature database, so the in-app "Update signatures" button may fail without root: that is expected, the service does it.
 
 ### clamd (fallback only)
@@ -50,8 +53,21 @@ Download the installer for your OS from the project's Releases page:
 - Windows: `.msi` or `-setup.exe`
 - macOS: `.dmg` (universal)
 - Linux: `.AppImage`, `.deb` or `.rpm`
+- Arch Linux / CachyOS: build the package with the provided PKGBUILD (below), or use the `.AppImage`
 
-Updates are offered in the app and are **verified with the project's signing key** before installation.
+Updates are offered in the app and are **verified with the project's signing key** before installation. On Linux the app installs updates itself only for the AppImage; packages installed with pacman/apt/dnf are updated by the package manager.
+
+### Arch Linux / CachyOS
+```bash
+sudo pacman -S --needed base-devel git
+git clone https://github.com/Simon-grtl/safefetch.git
+cd safefetch/packaging/arch
+makepkg -si          # builds from the tagged release and installs (pulls clamav as a dependency)
+```
+Then follow the ClamAV steps above (`sudo freshclam`, enable `clamav-freshclam.service`). SafeFetch appears in the application menu.
+
+- **VirusTotal key storage:** KDE Plasma (CachyOS default) uses KWallet; make sure KWallet is enabled (*System Settings → KDE Wallet*). On GNOME, Hyprland, Sway… install `gnome-keyring`.
+- **Blank window:** SafeFetch already disables WebKitGTK's DMA-BUF renderer, the usual cause with NVIDIA drivers and some Wayland setups. If the window is still blank, start it once with `WEBKIT_DISABLE_COMPOSITING_MODE=1 safefetch` and report it.
 
 > Unsigned builds: until the project obtains OS code-signing certificates, Windows SmartScreen and macOS Gatekeeper may warn on first launch. Check the SHA-256 of the installer against the one published in the release notes.
 
@@ -61,7 +77,7 @@ Updates are offered in the app and are **verified with the project's signing key
 3. Paste links, click **Fetch & scan**.
 
 ### Linux keychain note
-The key is stored through the Secret Service API (GNOME Keyring, KWallet…). On a desktop without one, saving the key fails on purpose (SafeFetch never stores it in plain text).
+The key is stored through the Secret Service API (GNOME Keyring, or KWallet on KDE Plasma/CachyOS). On a desktop without one, saving the key fails on purpose (SafeFetch never stores it in plain text).
 
 ## Settings file
 `settings.json` in the app config folder (`%APPDATA%\io.github.safefetch.app`, `~/Library/Application Support/io.github.safefetch.app`, `~/.config/io.github.safefetch.app`). Advanced options that are intentionally **not** editable from the UI: `clamav.clamscan_path`, `clamav.freshclam_path`, `clamav.clamd_address`, `clamav.clamd_conf_path`, ClamAV limits, `quarantine_dir`.

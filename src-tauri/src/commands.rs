@@ -206,6 +206,12 @@ pub async fn check_app_update(app: AppHandle) -> Result<Option<UpdateInfo>, Stri
 /// installs it and restarts.
 #[tauri::command]
 pub async fn install_app_update(app: AppHandle) -> Result<(), String> {
+    // On Linux the built-in updater can only replace an AppImage. Copies
+    // installed by pacman/apt/dnf (in /usr) are updated by the package manager.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("APPIMAGE").is_none() {
+        return Err("SafeFetch was installed with your package manager: update it there (Arch/CachyOS: sudo pacman -Syu, or your AUR helper; Debian/Ubuntu: sudo apt upgrade; Fedora: sudo dnf upgrade).".into());
+    }
     let updater = app.updater().map_err(|e| e.to_string())?;
     let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
         return Err("no update available".into());

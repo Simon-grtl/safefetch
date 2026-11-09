@@ -22,7 +22,21 @@ impl EventSink for TauriSink {
     }
 }
 
+/// WebKitGTK's DMA-BUF renderer shows a blank window on many Linux setups
+/// (proprietary NVIDIA driver, some Wayland compositors, VMs without GPU).
+/// SafeFetch's interface gains nothing from it, so it is disabled unless the
+/// user sets WEBKIT_DISABLE_DMABUF_RENDERER explicitly. Must run before any
+/// thread is started.
+#[cfg(target_os = "linux")]
+fn linux_webkit_workarounds() {
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+}
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    linux_webkit_workarounds();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("SAFEFETCH_LOG")

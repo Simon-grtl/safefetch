@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=SafeFetch
+GenericName=Safe Downloader
+Comment=Download files into quarantine, scan them, and deliver only clean files
+Exec=safefetch
+Icon=safefetch
+Terminal=false
+Categories=Network;FileTransfer;Security;
+Keywords=download;antivirus;clamav;virustotal;quarantine;
+StartupWMClass=safefetch

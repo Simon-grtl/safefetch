@@ -108,6 +108,63 @@ jobs:
             echo "::error::dev-connector compiled in release mode"; exit 1
           fi
 
+  linux-distros:
+    name: Test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Arch Linux
+            image: archlinux:latest
+          - name: CachyOS
+            image: cachyos/cachyos:latest
+    container: ${{ matrix.image }}
+    steps:
+      - name: System packages (pacman)
+        run: pacman -Syu --noconfirm --needed base-devel git rust webkit2gtk-4.1 gtk3 dbus clamav
+
+      - uses: actions/checkout@v5
+
+      # Arch/CachyOS are rebuilding ClamAV on OpenSSL 4, which breaks file
+      # hashing (Cisco-Talos/clamav#1887). If the distro's ClamAV is broken,
+      # warn and run the rest of the suite without it instead of failing on
+      # a problem that is not SafeFetch's.
+      - name: ClamAV self-check
+        shell: bash
+        run: |
+          D=$(mktemp -d); mkdir -p $D/db
+          echo "44d88612fea8a8f36de82e1278abb02f:68:SafeFetch.Test.EICAR" > $D/db/test.hdb
+          printf '%s' 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' > $D/eicar.txt
+          clamscan --version
+          if clamscan --no-summary -d $D/db $D/eicar.txt 2>&1 | tee $D/out | grep -q "SafeFetch.Test.EICAR.* FOUND" \
+             && ! grep -q "LibClamAV Error" $D/out; then
+            echo "SAFEFETCH_REQUIRE_CLAMAV=1" >> "$GITHUB_ENV"
+          else
+            cat $D/out
+            echo "::warning::The distribution's ClamAV package is broken (see Cisco-Talos/clamav#1887); ClamAV tests skipped on ${{ matrix.name }}"
+            pacman -Rns --noconfirm clamav
+          fi
+
+      - name: Tests
+        run: cargo test --workspace --locked
+
+      - name: Build and install the package (PKGBUILD / makepkg)
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          useradd -m builder
+          B=/home/builder/pkg; mkdir -p $B
+          cp packaging/arch/PKGBUILD $B/
+          ver=$(sed -n 's/^pkgver=//p' packaging/arch/PKGBUILD)
+          git archive --prefix="safefetch-$ver/" -o "$B/safefetch-$ver.tar.gz" HEAD
+          chown -R builder $B
+          cd $B && su builder -c "makepkg -f --skipchecksums --nodeps"
+          pacman -U --noconfirm --nodeps $B/safefetch-*.pkg.tar.zst
+          test -x /usr/bin/safefetch
+          test -f /usr/share/applications/io.github.safefetch.app.desktop
+          pacman -S --noconfirm --needed namcap && namcap $B/safefetch-*.pkg.tar.zst || true
+
   supply-chain:
     name: cargo-deny & cargo-audit
     runs-on: ubuntu-22.04
