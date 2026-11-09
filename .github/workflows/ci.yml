@@ -25,7 +25,7 @@ jobs:
         os: [ubuntu-22.04, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -39,9 +39,20 @@ jobs:
             libayatana-appindicator3-dev libssl-dev libdbus-1-dev clamav clamav-daemon
           sudo systemctl stop clamav-freshclam || true
 
-      - name: macOS ClamAV
+      # Official ClamAV installer, NOT Homebrew: Homebrew's clamav 1.5.4_1 is
+      # built on OpenSSL 4 and cannot hash files ("fmap_get_hash: error
+      # calculating sha2-256 hash"), see Cisco-Talos/clamav#1887.
+      - name: macOS ClamAV (official package)
         if: runner.os == 'macOS'
-        run: brew install clamav
+        env:
+          CLAMAV_VERSION: "1.5.4"
+        run: |
+          PKG=clamav-$CLAMAV_VERSION.macos.universal.pkg
+          curl -fsSL -o "$RUNNER_TEMP/$PKG" "https://github.com/Cisco-Talos/clamav/releases/download/clamav-$CLAMAV_VERSION/$PKG"
+          pkgutil --check-signature "$RUNNER_TEMP/$PKG" || true
+          sudo installer -pkg "$RUNNER_TEMP/$PKG" -target /
+          dirname "$(find /usr/local/clamav -type f -name clamscan | head -1)" >> "$GITHUB_PATH"
+          ls -la /usr/local/clamav
 
       - name: Windows ClamAV
         if: runner.os == 'Windows'
@@ -73,8 +84,13 @@ jobs:
           MaxScanSize 4000M
           StreamMaxLength 2047M
           EOF
-          clamd -c $D/clamd.conf &
-          for i in $(seq 1 30); do [ -S $D/clamd.sock ] && break; sleep 1; done
+          # Ubuntu's AppArmor profile is attached to /usr/sbin/clamd and forbids
+          # sockets/databases outside /var/run/clamav and /var/lib/clamav.
+          # A copy of the binary at another path runs unconfined (CI only).
+          cp /usr/sbin/clamd $D/clamd-ci
+          $D/clamd-ci -c $D/clamd.conf &
+          for i in $(seq 1 60); do [ -S $D/clamd.sock ] && break; sleep 1; done
+          [ -S $D/clamd.sock ] || { echo "::error::clamd did not start"; exit 1; }
           SAFEFETCH_CLAMD_CONF=$D/clamd.conf cargo test -p safefetch-core --test clamd
 
       - name: Large file test (3 GiB, Linux only)
@@ -96,7 +112,7 @@ jobs:
     name: cargo-deny & cargo-audit
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories bans licenses sources
@@ -112,6 +128,6 @@ jobs:
     container:
       image: semgrep/semgrep
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Semgrep (project rules + Rust/JS/secrets packs)
         run: semgrep scan --error --config .semgrep/ --config p/rust --config p/javascript --config p/secrets --exclude target

@@ -13,11 +13,14 @@ these steps if it is missing.
 4. Microsoft Defender is used in addition, automatically, if present.
 
 ### macOS
+Use the **official installer**, not Homebrew. Since November 2026 Homebrew's `clamav` (1.5.4_1) is built on OpenSSL 4 and cannot hash files or load the official signatures ([Cisco-Talos/clamav#1887](https://github.com/Cisco-Talos/clamav/issues/1887)). SafeFetch detects it and reports files as "Not analyzed", but nothing can be scanned.
+
+1. Download `clamav-<version>.macos.universal.pkg` from https://github.com/Cisco-Talos/clamav/releases and open it (installs into `/usr/local/clamav`).
+2. Configure and download the signatures:
 ```bash
-brew install clamav
-cp "$(brew --prefix)/etc/clamav/freshclam.conf.sample" "$(brew --prefix)/etc/clamav/freshclam.conf"
-sed -i '' '/^Example/d' "$(brew --prefix)/etc/clamav/freshclam.conf"
-freshclam
+cd /usr/local/clamav/etc
+sudo cp freshclam.conf.sample freshclam.conf && sudo sed -i '' '/^Example/d' freshclam.conf
+sudo /usr/local/clamav/bin/freshclam
 ```
 
 ### Linux

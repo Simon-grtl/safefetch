@@ -54,6 +54,9 @@ pub fn find_executable(base: &str) -> Option<PathBuf> {
                 "/usr/sbin",
                 "/usr/local/sbin",
                 "/opt/homebrew/sbin",
+                // Official ClamAV macOS installer (.pkg)
+                "/usr/local/clamav/bin",
+                "/usr/local/clamav/sbin",
             ]
             .map(PathBuf::from),
         );
@@ -145,6 +148,18 @@ pub fn truncation_marker(line: &str) -> Option<String> {
     })
 }
 
+/// Turn a libclamav error line into a message the user can act on.
+pub fn explain_error(line: &str) -> String {
+    let short: String = line.chars().take(160).collect();
+    if line.contains("fmap_get_hash") || line.contains("error calculating") {
+        // Seen on Homebrew ClamAV 1.5.4 built against OpenSSL 4 (Nov 2026):
+        // ClamAV cannot hash files, so hash signatures never match.
+        format!("{short} — this ClamAV installation cannot compute file hashes (known problem with Homebrew ClamAV built on OpenSSL 4). Install the official ClamAV package from clamav.net instead.")
+    } else {
+        short
+    }
+}
+
 /// Parse clamscan output (`--stdout --infected`) and exit code.
 /// Exit codes: 0 = clean, 1 = found, 2 = error (also used when a limit
 /// heuristic fires on huge files). `truncated` holds debug evidence that
@@ -220,7 +235,7 @@ pub async fn scan_with_clamscan(exe: &Path, s: &ClamAvSettings, file: &Path) -> 
                         // scanned (re-audit: truncated .xz only logs an Error).
                         .or_else(|| {
                             line.starts_with("LibClamAV Error:")
-                                .then(|| line.chars().take(160).collect())
+                                .then(|| explain_error(&line))
                         })
                         // Some ClamAV builds ship without RAR support (e.g.
                         // Debian/Ubuntu): RAR content would be skipped silently.
@@ -902,5 +917,15 @@ mod tests {
         }
         // Directory entries / empty files are benign.
         assert!(truncation_marker("LibClamAV debug: cli_unzip: Skipping decompression of file entry at offset: 0x0, size: 0, compressed data not available").is_none());
+    }
+
+    #[test]
+    fn broken_hashing_gets_an_actionable_message() {
+        let m = explain_error("LibClamAV Error: fmap_get_hash: error calculating sha2-256 hash!");
+        assert!(m.contains("official ClamAV package"));
+        assert_eq!(
+            explain_error("LibClamAV Error: other"),
+            "LibClamAV Error: other"
+        );
     }
 }

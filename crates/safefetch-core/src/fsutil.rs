@@ -19,6 +19,7 @@ pub fn create_private_dir(path: &Path) -> Result<()> {
 
 /// Open options for a new private file: 0600 on Unix (never executable).
 pub fn private_file_options() -> OpenOptions {
+    #[allow(unused_mut)] // only mutated on Unix
     let mut o = OpenOptions::new();
     #[cfg(unix)]
     {

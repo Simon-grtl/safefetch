@@ -250,7 +250,7 @@ pub fn env_in(dir: tempfile::TempDir, opts: EnvOptions) -> Env {
     std::fs::create_dir_all(&dest).unwrap();
     std::fs::create_dir_all(&config).unwrap();
     let mut s = Settings {
-        destination_dir: Some(dest.canonicalize().unwrap()),
+        destination_dir: Some(dunce::canonicalize(&dest).unwrap()),
         vt_min_interval_secs: 0,
         ..Default::default()
     };
@@ -284,7 +284,7 @@ pub fn env_in(dir: tempfile::TempDir, opts: EnvOptions) -> Env {
     )
     .unwrap();
     Env {
-        dest: dest.canonicalize().unwrap(),
+        dest: dunce::canonicalize(&dest).unwrap(),
         dir,
         config,
         engine,
