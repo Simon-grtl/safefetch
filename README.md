@@ -40,6 +40,9 @@ cargo tauri build                 # installers in target/release/bundle/
 Development with runtime inspection (tauri-connector, never in release builds):
 `cargo tauri dev --features dev-connector --config src-tauri/tauri.dev.conf.json`
 
+## Use of AI
+SafeFetch was built with the help of an AI assistant (Claude, by Anthropic): code, tests, documentation and security reviews were produced with AI assistance, under the direction of the project's author. The security audit findings and the decisions taken are documented in `SECURITY_AUDIT.md` and `DECISIONS.md`.
+
 ## Project layout
 | Path | Content |
 |---|---|
