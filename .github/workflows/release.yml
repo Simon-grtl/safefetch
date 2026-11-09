@@ -47,17 +47,52 @@ jobs:
             echo "::error::set plugins.updater.pubkey and the endpoints URL in tauri.conf.json"; exit 1
           fi
 
-      - uses: tauri-apps/tauri-action@v0
+      # Fail fast with a clear message instead of after a 20-minute build.
+      - name: Check the updater signing key and password
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::Secret TAURI_SIGNING_PRIVATE_KEY is missing"; exit 1
+          fi
+          echo "probe" > "$RUNNER_TEMP/probe.txt"
+          if ! npx --yes @tauri-apps/cli@2 signer sign "$RUNNER_TEMP/probe.txt" > "$RUNNER_TEMP/sign.log" 2>&1; then
+            cat "$RUNNER_TEMP/sign.log"
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY_PASSWORD does not match TAURI_SIGNING_PRIVATE_KEY (re-enter the secret, without spaces or line breaks)"
+            exit 1
+          fi
+
+      # GitHub passes missing secrets as empty strings, and Tauri then tries to
+      # import an empty Apple certificate. Export the Apple variables only
+      # when a certificate is configured; otherwise build an unsigned app.
+      - name: Apple code signing (only if configured)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+              if [ -n "${!v}" ]; then
+                { echo "$v<<__SAFEFETCH_EOF__"; printenv "$v"; echo "__SAFEFETCH_EOF__"; } >> "$GITHUB_ENV"
+              fi
+            done
+          else
+            echo "::notice::No Apple certificate configured: the macOS app is built without Apple code signing."
+          fi
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: SafeFetch ${{ github.ref_name }}
