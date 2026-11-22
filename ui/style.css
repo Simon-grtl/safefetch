@@ -113,4 +113,20 @@ th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line
 th { color: var(--muted); font-weight: 600; }
 h3 { font-size: 13.5px; margin: 14px 0 6px; }
 
-.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 9px 16px; border-radius: 10px; max-width: 80vw; z-index: 10; box-shadow: 0 6px 24px rgb(0 0 0 / .25); }
+.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 9px 16px; border-radius: 10px; max-width: 80vw; z-index: 30; white-space: pre-line; box-shadow: 0 6px 24px rgb(0 0 0 / .25); }
+
+.input-buttons { display: flex; gap: 8px; flex-shrink: 0; }
+.input-card .hint { margin-top: 8px; }
+.sig-msg { white-space: pre-line; background: var(--bg); border-radius: 8px; padding: 8px 10px; }
+
+.alerts { border-color: var(--bad); }
+.alerts h2 { color: var(--bad); }
+#alert-list { list-style: none; margin: 10px 0 0; padding: 0; }
+.alert { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; padding: 10px 0; border-top: 1px solid var(--line); align-items: center; }
+.alert .name { font-weight: 600; overflow-wrap: anywhere; }
+.alert .sub { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.alert .actions { grid-row: 1 / span 2; grid-column: 2; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+
+.drop-overlay { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; background: color-mix(in srgb, var(--accent) 22%, transparent); pointer-events: none; }
+.drop-overlay > div { background: var(--panel); border: 2px dashed var(--accent); border-radius: 16px; padding: 28px 40px; font-size: 18px; font-weight: 650; text-align: center; }
+.drop-overlay small { font-size: 13px; font-weight: 400; color: var(--muted); }

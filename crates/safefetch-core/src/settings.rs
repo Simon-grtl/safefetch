@@ -90,6 +90,10 @@ pub struct Settings {
     pub use_defender: bool,
     pub auto_update_signatures: bool,
     pub check_app_updates: bool,
+    /// Weekly VirusTotal re-check of the hashes of delivered files.
+    pub weekly_recheck: bool,
+    /// At most this many hash lookups per weekly re-check (VirusTotal quota).
+    pub recheck_max_per_run: u32,
     pub clamav: ClamAvSettings,
 }
 
@@ -116,6 +120,8 @@ impl Default for Settings {
             use_defender: true,
             auto_update_signatures: true,
             check_app_updates: true,
+            weekly_recheck: true,
+            recheck_max_per_run: 100,
             clamav: ClamAvSettings::default(),
         }
     }
@@ -137,6 +143,12 @@ pub struct UiSettings {
     pub use_defender: bool,
     pub auto_update_signatures: bool,
     pub check_app_updates: bool,
+    #[serde(default = "default_true")]
+    pub weekly_recheck: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Settings {
@@ -157,6 +169,7 @@ impl Settings {
             use_defender: self.use_defender,
             auto_update_signatures: self.auto_update_signatures,
             check_app_updates: self.check_app_updates,
+            weekly_recheck: self.weekly_recheck,
         }
     }
 
@@ -174,6 +187,7 @@ impl Settings {
         self.use_defender = ui.use_defender;
         self.auto_update_signatures = ui.auto_update_signatures;
         self.check_app_updates = ui.check_app_updates;
+        self.weekly_recheck = ui.weekly_recheck;
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -192,6 +206,9 @@ impl Settings {
         }
         if self.max_redirects > 20 {
             return bad("At most 20 redirects.");
+        }
+        if self.recheck_max_per_run > 500 {
+            return bad("At most 500 re-check lookups per run (VirusTotal daily quota).");
         }
         if self.connect_timeout_secs == 0 || self.idle_timeout_secs == 0 {
             return bad("Timeouts must be positive.");

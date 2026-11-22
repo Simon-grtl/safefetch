@@ -21,7 +21,11 @@ destination folder.
 ┌───────────────┴─────────────────────────────────────────────────────────────┐
 │ crates/safefetch-core (no Tauri dependency, fully unit/integration tested)  │
 │                                                                             │
-│ input      parse "URL [sha256]" lines                                       │
+│ input      parse "URL [sha256 | SHA256SUMS link]" lines                     │
+│ checksums  publisher checksum lists (GNU/BSD formats), size-limited fetch   │
+│ filetype   magic bytes vs extension (program disguised as a document)       │
+│ signatures ClamAV updates: systemd service, private store, Windows task     │
+│ recheck    weekly VirusTotal re-check of delivered files' hashes            │
 │ engine     job orchestration, concurrency gate, scan serialisation          │
 │ net        HTTP client, manual redirects, SSRF guard (public-only resolver) │
 │ download   streaming, Range resume, size/disk checks, retries               │
@@ -40,6 +44,12 @@ destination folder.
 
 The security-relevant logic lives in `safefetch-core`, which compiles and is
 tested without a GUI. The Tauri crate is an adapter; it holds no business logic.
+
+Local files (button "Analyze local files…" or a drop on the window) take a
+shorter path: the paths come from the OS picker or the OS drag-and-drop event,
+handled in Rust (`main.rs`), never from the webview. The file is hashed and
+scanned **where it is** (VirusTotal hash lookup, ClamAV, Defender, type check)
+and is never moved, copied, modified or deleted; the outcome is "Analyzed".
 
 ## 2. Data flow for one link
 

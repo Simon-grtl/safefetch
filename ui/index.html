@@ -18,25 +18,38 @@
   </header>
 
   <main>
+    <section class="alerts hidden" id="alerts" aria-live="polite">
+      <h2>Files delivered earlier are now flagged</h2>
+      <p class="hint">The weekly re-check looked up the SHA-256 of your delivered files on VirusTotal again. These were clean when delivered but are now detected. SafeFetch has not touched them: delete them yourself if you do not trust them.</p>
+      <ul id="alert-list"></ul>
+    </section>
+
     <section class="setup hidden" id="setup">
       <h2>Before you start</h2>
       <ul id="setup-list"></ul>
       <div class="setup-actions">
         <button type="button" id="setup-dest">Choose destination folder…</button>
         <button type="button" class="ghost" id="setup-sigs">Update ClamAV signatures</button>
+        <button type="button" class="ghost hidden" id="setup-service">Enable automatic updates…</button>
+        <button type="button" class="ghost hidden" id="setup-task">Schedule daily updates</button>
         <button type="button" class="ghost" id="setup-recheck">Re-check</button>
       </div>
+      <p class="hint mono sig-msg hidden" id="setup-sig-msg"></p>
       <details id="install-help"><summary>How to install ClamAV on this system</summary><ol id="install-steps"></ol></details>
     </section>
 
     <section class="input-card">
-      <label for="links">Links to download — one per line, optionally followed by the expected SHA-256</label>
-      <textarea id="links" rows="4" spellcheck="false" placeholder="https://example.org/file.iso
+      <label for="links">Links to download — one per line, optionally followed by the expected SHA-256 or by the link to the publisher's SHA256SUMS file</label>
+      <textarea id="links" rows="4" spellcheck="false" placeholder="https://example.org/file.iso  https://example.org/SHA256SUMS
 https://example.org/tool.zip  3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b"></textarea>
       <div class="input-row">
         <div id="input-errors" class="errors" aria-live="polite"></div>
-        <button type="button" id="submit" class="primary">Fetch &amp; scan</button>
+        <div class="input-buttons">
+          <button type="button" id="pick-local" class="ghost" title="Check files already on this computer. They are not moved, modified or deleted.">Analyze local files…</button>
+          <button type="button" id="submit" class="primary">Fetch &amp; scan</button>
+        </div>
       </div>
+      <p class="hint">Tip: drop files from your computer anywhere on this window to analyze them in place.</p>
     </section>
 
     <section class="jobs">
@@ -44,7 +57,7 @@ https://example.org/tool.zip  3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c183542
         <h2>Files</h2>
         <button type="button" class="ghost small" id="clear">Clear finished</button>
       </div>
-      <div id="empty" class="empty">No downloads yet. Paste a link above.</div>
+      <div id="empty" class="empty">No files yet. Paste a link above, or drop a file here to analyze it.</div>
       <ul id="job-list"></ul>
     </section>
   </main>
@@ -87,8 +100,25 @@ https://example.org/tool.zip  3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c183542
         </div>
         <label class="check"><input type="checkbox" id="s-http"> Allow plain HTTP links (a warning is shown)</label>
         <label class="check"><input type="checkbox" id="s-defender"> Also scan with Microsoft Defender (Windows)</label>
-        <label class="check"><input type="checkbox" id="s-fresh"> Update ClamAV signatures daily</label>
         <label class="check"><input type="checkbox" id="s-upd"> Check for SafeFetch updates</label>
+      </fieldset>
+      <fieldset>
+        <legend>ClamAV signatures</legend>
+        <p class="hint" id="s-sig-state"></p>
+        <label class="check"><input type="checkbox" id="s-fresh"> Update ClamAV signatures daily while SafeFetch runs</label>
+        <div class="row">
+          <button type="button" id="s-sig-update">Update now</button>
+          <button type="button" class="hidden" id="s-sig-service">Enable automatic updates…</button>
+          <button type="button" class="hidden" id="s-sig-task">Schedule daily updates</button>
+          <button type="button" class="ghost hidden" id="s-sig-untask">Remove scheduled task</button>
+        </div>
+        <p class="hint mono sig-msg hidden" id="s-sig-msg"></p>
+      </fieldset>
+      <fieldset>
+        <legend>Weekly re-check of delivered files</legend>
+        <label class="check"><input type="checkbox" id="s-recheck"> Once a week, look up the SHA-256 of delivered files on VirusTotal again</label>
+        <div class="row"><button type="button" id="s-recheck-now">Re-check now</button><span class="hint" id="s-recheck-state"></span></div>
+        <p class="hint">Catches files that were clean when delivered but are detected later. Only hashes are sent (needs a VirusTotal key; at most 100 lookups per run).</p>
       </fieldset>
       <p id="s-error" class="errors"></p>
     </div>
@@ -98,6 +128,7 @@ https://example.org/tool.zip  3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c183542
     </div>
   </dialog>
 
+  <div id="drop-overlay" class="drop-overlay hidden" aria-hidden="true"><div>Drop to analyze<br><small>Files are checked in place: never moved, modified or deleted</small></div></div>
   <div id="toast" class="toast hidden" role="status"></div>
 </body>
 </html>

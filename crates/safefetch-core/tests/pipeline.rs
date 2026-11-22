@@ -88,7 +88,7 @@ async fn eicar_is_detected_and_deleted() {
         assert!(
             v.detections
                 .iter()
-                .any(|d| d.name.contains("SafeFetch.Test.EICAR")),
+                .any(|d| d.name.to_ascii_uppercase().contains("EICAR")),
             "{:?}",
             v.detections
         );

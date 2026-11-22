@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-recheck-now"
+description = "Enables the recheck_now command without any pre-configured scope."
+commands.allow = ["recheck_now"]
+
+[[permission]]
+identifier = "deny-recheck-now"
+description = "Denies the recheck_now command without any pre-configured scope."
+commands.deny = ["recheck_now"]

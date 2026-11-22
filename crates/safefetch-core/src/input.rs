@@ -1,5 +1,6 @@
 //! Parsing of the text the user pastes: one link per line, optionally
-//! followed by the expected SHA-256 (`URL<space>HASH` or `URL sha256:HASH`).
+//! followed by the expected SHA-256 (`URL<space>HASH` or `URL sha256:HASH`)
+//! or by the link to the publisher's checksum list (`URL<space>SUMS-URL`).
 
 use serde::Serialize;
 use url::Url;
@@ -8,6 +9,8 @@ use url::Url;
 pub struct LinkRequest {
     pub url: Url,
     pub expected_sha256: Option<String>,
+    /// Publisher's checksum list (SHA256SUMS…) to look the file up in.
+    pub checksum_url: Option<Url>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -58,7 +61,7 @@ pub fn parse_links(text: &str) -> (Vec<LinkRequest>, Vec<InputError>) {
         if parts.next().is_some() {
             errors.push(InputError {
                 line: i + 1,
-                message: "expected \"URL [sha256]\"".into(),
+                message: "expected \"URL [sha256 or checksum-list link]\"".into(),
             });
             continue;
         }
@@ -72,28 +75,40 @@ pub fn parse_links(text: &str) -> (Vec<LinkRequest>, Vec<InputError>) {
                 continue;
             }
         };
-        let expected_sha256 = match hash {
-            None => None,
+        let (expected_sha256, checksum_url) = match hash {
+            None => (None, None),
+            Some(h) if h.contains("://") => match parse_url(h) {
+                Ok(u) => (None, Some(u)),
+                Err(e) => {
+                    errors.push(InputError {
+                        line: i + 1,
+                        message: format!("checksum list link: {e}"),
+                    });
+                    continue;
+                }
+            },
             Some(h) => match parse_sha256(h) {
-                Some(h) => Some(h),
+                Some(h) => (Some(h), None),
                 None => {
                     errors.push(InputError {
                         line: i + 1,
-                        message: "the checksum must be a 64-character SHA-256 in hex".into(),
+                        message: "after the link, give a 64-character SHA-256 or the link to the publisher's SHA256SUMS file".into(),
                     });
                     continue;
                 }
             },
         };
         if let Some(existing) = ok.iter_mut().find(|r| r.url == url) {
-            if existing.expected_sha256.is_none() {
+            if existing.expected_sha256.is_none() && existing.checksum_url.is_none() {
                 existing.expected_sha256 = expected_sha256;
+                existing.checksum_url = checksum_url;
             }
             continue;
         }
         ok.push(LinkRequest {
             url,
             expected_sha256,
+            checksum_url,
         });
     }
     (ok, errors)
@@ -126,6 +141,21 @@ mod tests {
         assert!(ok.is_empty());
         assert_eq!(err.len(), 5);
         assert_eq!(err[0].line, 1);
+    }
+
+    #[test]
+    fn checksum_list_links() {
+        let (ok, err) = parse_links(
+            "https://a.example/x.iso https://a.example/SHA256SUMS\nhttps://b.example/y.iso ftp://b.example/SUMS\n",
+        );
+        assert_eq!(ok.len(), 1);
+        assert_eq!(ok[0].expected_sha256, None);
+        assert_eq!(
+            ok[0].checksum_url.as_ref().map(Url::as_str),
+            Some("https://a.example/SHA256SUMS")
+        );
+        assert_eq!(err.len(), 1);
+        assert!(err[0].message.contains("checksum list link"));
     }
 
     #[test]

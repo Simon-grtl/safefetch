@@ -10,20 +10,24 @@ use serde::Serialize;
 use tokio::sync::Notify;
 use url::Url;
 
+use crate::checksums::{self, ChecksumListResult};
 use crate::delivery;
 use crate::download::{self, DownloadContext, Progress, SpaceProbe};
 use crate::error::{Error, Result};
+use crate::filetype;
 use crate::fsutil::now_unix;
 use crate::hash;
 use crate::history::{url_hash, History, HistoryEntry};
 use crate::input::{parse_links, InputError, LinkRequest};
 use crate::net::{build_client, display_url, host_is_local, ClientOptions};
 use crate::quarantine::{ItemMeta, ItemState, Quarantine};
+use crate::recheck::{Candidate, RecheckAlert, RecheckState, RecheckSummary};
 use crate::sanitize::{filename_from_url, sanitize_filename, NameWarning};
 use crate::scanners::virustotal::{RateLimiter, VtClient, VtStats};
 use crate::scanners::{clamav, defender};
 use crate::secrets::{validate_vt_key, SecretStore, SecretString};
 use crate::settings::{Settings, UiSettings};
+use crate::signatures::{self, SignatureStatus};
 use crate::verdict::{
     decide, Detection, EngineResult, ScanReport, Thresholds, Verdict, VerdictLevel, VtFileResult,
 };
@@ -70,6 +74,10 @@ pub enum Outcome {
     },
     /// Removed from quarantine by the user.
     Discarded,
+    /// A local file analyzed in place: it is never moved, copied or deleted.
+    Analyzed {
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -94,6 +102,8 @@ pub struct LinkCheck {
 #[derive(Debug, Clone, Serialize)]
 pub struct JobSnapshot {
     pub id: u64,
+    /// A file from this computer (analysis only) rather than a link.
+    pub local: bool,
     pub display_url: String,
     pub final_host: Option<String>,
     pub file_name: String,
@@ -107,10 +117,14 @@ pub struct JobSnapshot {
     pub verdict: Option<Verdict>,
     pub warnings: Vec<String>,
     pub expected_sha256: Option<String>,
+    /// Publisher's checksum list (display form).
+    pub checksum_list: Option<String>,
 }
 
 pub trait EventSink: Send + Sync + 'static {
     fn job_updated(&self, job: &JobSnapshot);
+    /// The weekly re-check found (or the user dismissed) alerts.
+    fn recheck_alerts(&self, _alerts: &[RecheckAlert]) {}
 }
 
 /// Discards events (tests, headless use).
@@ -126,6 +140,24 @@ pub struct SubmitResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct LocalSubmitResult {
+    pub added: Vec<u64>,
+    pub errors: Vec<String>,
+}
+
+/// At most this many files per drop / pick.
+pub const MAX_LOCAL_FILES: usize = 100;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RecheckStatus {
+    pub enabled: bool,
+    pub has_api_key: bool,
+    pub last_run: Option<u64>,
+    pub running: bool,
+    pub alerts: Vec<RecheckAlert>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct EnvironmentStatus {
     pub os: &'static str,
     pub clamscan: Option<String>,
@@ -138,11 +170,14 @@ pub struct EnvironmentStatus {
     pub destination: Option<String>,
     pub quarantine_dir: Option<String>,
     pub install_help: Vec<String>,
+    pub signature_updates: SignatureStatus,
 }
 
 /// Engine construction parameters (tests shorten delays and mock services).
 pub struct EngineConfig {
     pub config_dir: PathBuf,
+    /// Large local data (SafeFetch's own ClamAV signatures). Not roaming.
+    pub data_dir: PathBuf,
     pub retry_base_delay: Duration,
     pub vt_base: Option<Url>,
     pub vt_backoff: Duration,
@@ -152,6 +187,7 @@ pub struct EngineConfig {
 impl EngineConfig {
     pub fn new(config_dir: PathBuf) -> Self {
         Self {
+            data_dir: config_dir.clone(),
             config_dir,
             retry_base_delay: Duration::from_secs(2),
             vt_base: None,
@@ -164,6 +200,8 @@ impl EngineConfig {
 struct Job {
     snap: JobSnapshot,
     request: LinkRequest,
+    /// Local file analyzed in place (path from the OS picker or a drop).
+    local: Option<PathBuf>,
     qid: Option<String>,
     cancel: Arc<AtomicBool>,
     force_link: bool,
@@ -226,6 +264,9 @@ struct Inner {
     history: Mutex<History>,
     sink: Arc<dyn EventSink>,
     last_signature_update: Mutex<Option<(u64, std::result::Result<String, String>)>>,
+    signature_lock: tokio::sync::Mutex<()>,
+    recheck: Mutex<RecheckState>,
+    recheck_running: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -249,6 +290,7 @@ impl Engine {
         crate::fsutil::create_private_dir(&cfg.config_dir)?;
         let settings = Settings::load(&cfg.config_dir.join("settings.json"))?;
         let history = History::load(&cfg.config_dir.join("history.json"));
+        let recheck = RecheckState::load(&cfg.config_dir.join("recheck.json"));
         let limiter = Arc::new(RateLimiter::new(
             Duration::from_secs(settings.vt_min_interval_secs),
             settings.vt_daily_quota,
@@ -271,6 +313,9 @@ impl Engine {
                 history: Mutex::new(history),
                 sink,
                 last_signature_update: Mutex::new(None),
+                signature_lock: tokio::sync::Mutex::new(()),
+                recheck: Mutex::new(recheck),
+                recheck_running: AtomicBool::new(false),
             }),
         };
         engine.restore_quarantine();
@@ -391,11 +436,65 @@ impl Engine {
             if dup.unwrap_or(false) {
                 continue;
             }
-            let id = self.inner.add_job(req, None, None);
+            let id = self.inner.add_job(req, None, None, None);
             added.push(id);
             self.spawn(id);
         }
         SubmitResult { added, errors }
+    }
+
+    /// Analyze files of this computer in place. The paths come ONLY from the
+    /// native file picker or an OS drag-and-drop (never from the webview).
+    /// The files are read (hash, ClamAV, Defender, type check), never moved,
+    /// copied, modified or deleted.
+    pub fn submit_local(&self, paths: Vec<PathBuf>) -> LocalSubmitResult {
+        let mut added = Vec::new();
+        let mut errors = Vec::new();
+        if paths.len() > MAX_LOCAL_FILES {
+            errors.push(format!(
+                "Only the first {MAX_LOCAL_FILES} files are analyzed at once."
+            ));
+        }
+        for path in paths.into_iter().take(MAX_LOCAL_FILES) {
+            let shown = path.display().to_string();
+            let path = match dunce::canonicalize(&path) {
+                Ok(p) => p,
+                Err(e) => {
+                    errors.push(format!("{shown}: {e}"));
+                    continue;
+                }
+            };
+            if path.is_dir() {
+                errors.push(format!(
+                    "{shown}: folders are not analyzed; select or drop the files themselves"
+                ));
+                continue;
+            }
+            if !path.is_file() {
+                errors.push(format!("{shown}: not a regular file"));
+                continue;
+            }
+            let Ok(url) = Url::from_file_path(&path) else {
+                errors.push(format!("{shown}: unsupported path"));
+                continue;
+            };
+            let dup = self.inner.jobs.lock().map(|jobs| {
+                jobs.values()
+                    .any(|j| j.local.as_deref() == Some(path.as_path()) && j.snap.outcome.is_none())
+            });
+            if dup.unwrap_or(false) {
+                continue;
+            }
+            let req = LinkRequest {
+                url,
+                expected_sha256: None,
+                checksum_url: None,
+            };
+            let id = self.inner.add_job(req, None, None, Some(path));
+            added.push(id);
+            self.spawn(id);
+        }
+        LocalSubmitResult { added, errors }
     }
 
     fn spawn(&self, id: u64) {
@@ -461,9 +560,14 @@ impl Engine {
         self.restart(id, |o| matches!(o, Some(Outcome::Blocked { .. })), true)
     }
 
-    /// Re-run the scanners on a quarantined file (e.g. after installing ClamAV).
+    /// Re-run the scanners on a quarantined file (e.g. after installing
+    /// ClamAV) or on an analyzed local file.
     pub fn rescan(&self, id: u64) -> Result<()> {
-        self.restart(id, |o| matches!(o, Some(Outcome::Quarantined)), false)
+        self.restart(
+            id,
+            |o| matches!(o, Some(Outcome::Quarantined | Outcome::Analyzed { .. })),
+            false,
+        )
     }
 
     fn restart(
@@ -588,6 +692,16 @@ impl Engine {
             .or_else(|| j.link_check.and_then(|l| l.permalink))
     }
 
+    /// The original path of an analyzed local file (from the OS, never the UI).
+    pub fn local_path(&self, id: u64) -> Option<PathBuf> {
+        self.inner
+            .jobs
+            .lock()
+            .ok()?
+            .get(&id)
+            .and_then(|j| j.local.clone())
+    }
+
     pub fn delivered_path(&self, id: u64) -> Option<PathBuf> {
         match self.job(id)?.outcome? {
             Outcome::Delivered { path } | Outcome::AlreadyDownloaded { path } => {
@@ -633,18 +747,124 @@ impl Engine {
                 .ok()
                 .map(|q| q.root().display().to_string()),
             install_help: install_help(),
+            signature_updates: signatures::status(&s.clamav, &self.inner.managed()).await,
         }
     }
 
+    /// Update ClamAV signatures with the method that works on this system
+    /// (see `signatures.rs`); may switch clamscan to SafeFetch's own copy.
     pub async fn update_signatures(&self) -> std::result::Result<String, String> {
-        let r = clamav::update_signatures(&self.settings().clamav).await;
+        let _one_at_a_time = self.inner.signature_lock.lock().await;
+        let s = self.settings();
+        let r = match signatures::update(&s.clamav, &self.inner.managed()).await {
+            Ok(report) => match report.use_database {
+                Some(db) => self
+                    .set_database_dir(db)
+                    .map(|()| report.message)
+                    .map_err(|e| e.to_string()),
+                None => Ok(report.message),
+            },
+            Err(e) => Err(e),
+        };
         if let Ok(mut l) = self.inner.last_signature_update.lock() {
             *l = Some((now_unix(), r.clone()));
         }
         r
     }
 
-    /// Daily freshclam while the app runs (if enabled in settings).
+    fn set_database_dir(&self, db: PathBuf) -> Result<()> {
+        let mut s = self.settings();
+        s.clamav.database_dir = Some(db);
+        s.save(&self.inner.settings_path())?;
+        *self.inner.settings.write().map_err(lock_err)? = s;
+        Ok(())
+    }
+
+    /// Linux: enable the clamav-freshclam service (system password prompt).
+    pub async fn enable_signature_service(&self) -> std::result::Result<String, String> {
+        signatures::enable_service().await
+    }
+
+    /// Windows: create or remove the daily Scheduled Task. Creating it first
+    /// makes sure an update works (possibly switching to SafeFetch's own copy).
+    pub async fn schedule_signature_updates(
+        &self,
+        enable: bool,
+    ) -> std::result::Result<String, String> {
+        if !enable {
+            return signatures::unschedule_task().await;
+        }
+        if !cfg!(windows) {
+            return Err("only available on Windows".into());
+        }
+        let first = self.update_signatures().await?;
+        let s = self.settings();
+        let done = signatures::schedule_task(&s.clamav, &self.inner.managed()).await?;
+        Ok(format!("{done}\n{first}"))
+    }
+
+    // ---- weekly re-check of delivered files ----
+
+    pub fn recheck_status(&self) -> RecheckStatus {
+        let (last_run, alerts) = self
+            .inner
+            .recheck
+            .lock()
+            .map(|r| (r.last_run, r.active_alerts()))
+            .unwrap_or_default();
+        RecheckStatus {
+            enabled: self.settings().weekly_recheck,
+            has_api_key: self.has_api_key(),
+            last_run,
+            running: self.inner.recheck_running.load(Ordering::Relaxed),
+            alerts,
+        }
+    }
+
+    /// Look the hashes of delivered files up again on VirusTotal (by hash
+    /// only). Runs weekly in the background, or now on user request.
+    pub async fn recheck_now(&self) -> Result<RecheckSummary> {
+        if self.inner.recheck_running.swap(true, Ordering::SeqCst) {
+            return Err(Error::Policy("a re-check is already running".into()));
+        }
+        struct Reset<'a>(&'a AtomicBool);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        let _reset = Reset(&self.inner.recheck_running);
+        self.inner.run_recheck().await
+    }
+
+    pub fn dismiss_recheck_alert(&self, id: &str) -> Result<()> {
+        let alerts = {
+            let mut st = self.inner.recheck.lock().map_err(lock_err)?;
+            if !st.dismiss(id) {
+                return Err(Error::NotFound);
+            }
+            st.save()?;
+            st.active_alerts()
+        };
+        self.inner.sink.recheck_alerts(&alerts);
+        Ok(())
+    }
+
+    /// Path and VirusTotal link of an alert (looked up in Rust state; the UI
+    /// only sends the alert id).
+    pub fn recheck_alert(&self, id: &str) -> Option<RecheckAlert> {
+        self.inner
+            .recheck
+            .lock()
+            .ok()?
+            .alerts
+            .iter()
+            .find(|a| a.id == id)
+            .cloned()
+    }
+
+    /// Daily freshclam and weekly re-check while the app runs (each if
+    /// enabled in settings).
     pub fn start_background_tasks(&self) {
         let engine = self.clone();
         self.inner.rt.spawn(async move {
@@ -655,6 +875,30 @@ impl Engine {
                     }
                 }
                 tokio::time::sleep(Duration::from_secs(24 * 3600)).await;
+            }
+        });
+        let engine = self.clone();
+        self.inner.rt.spawn(async move {
+            // Leave the start-up to the user's own downloads first.
+            tokio::time::sleep(Duration::from_secs(300)).await;
+            loop {
+                let due = engine
+                    .inner
+                    .recheck
+                    .lock()
+                    .map(|r| r.due(now_unix()))
+                    .unwrap_or(false);
+                if due && engine.settings().weekly_recheck && engine.has_api_key() {
+                    match engine.recheck_now().await {
+                        Ok(r) => tracing::info!(
+                            checked = r.checked,
+                            alerts = r.new_alerts,
+                            "weekly re-check done"
+                        ),
+                        Err(e) => tracing::warn!("weekly re-check failed: {e}"),
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
             }
         });
     }
@@ -688,10 +932,14 @@ impl Engine {
             let req = LinkRequest {
                 url,
                 expected_sha256: meta.expected_sha256.clone(),
+                checksum_url: meta
+                    .checksum_url
+                    .as_deref()
+                    .and_then(|u| Url::parse(u).ok()),
             };
             let id = self
                 .inner
-                .add_job(req, Some(meta.id.clone()), Some(outcome));
+                .add_job(req, Some(meta.id.clone()), Some(outcome), None);
             self.inner.update(id, |j| {
                 j.snap.file_name = meta.file_name.clone();
                 j.snap.name_warnings = meta.name_warnings.clone();
@@ -713,6 +961,10 @@ impl Inner {
 
     fn settings_path(&self) -> PathBuf {
         self.cfg.config_dir.join("settings.json")
+    }
+
+    fn managed(&self) -> signatures::Managed {
+        signatures::Managed::new(&self.cfg.data_dir)
     }
 
     fn quarantine(&self, s: &Settings) -> Result<Quarantine> {
@@ -747,11 +999,24 @@ impl Inner {
         Some(c)
     }
 
-    fn add_job(&self, request: LinkRequest, qid: Option<String>, outcome: Option<Outcome>) -> u64 {
+    fn add_job(
+        &self,
+        request: LinkRequest,
+        qid: Option<String>,
+        outcome: Option<Outcome>,
+        local: Option<PathBuf>,
+    ) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let guess = filename_from_url(&request.url)
-            .map(|n| sanitize_filename(&n).name)
-            .unwrap_or_else(|| "download".into());
+        let local_name = local
+            .as_deref()
+            .and_then(Path::file_name)
+            .map(|n| sanitize_filename(&n.to_string_lossy()));
+        let guess = match &local_name {
+            Some(n) => n.name.clone(),
+            None => filename_from_url(&request.url)
+                .map(|n| sanitize_filename(&n).name)
+                .unwrap_or_else(|| "download".into()),
+        };
         let mut warnings = Vec::new();
         if request.url.scheme() == "http" {
             warnings.push(
@@ -760,10 +1025,14 @@ impl Inner {
         }
         let snap = JobSnapshot {
             id,
-            display_url: display_url(&request.url),
+            local: local.is_some(),
+            display_url: match &local {
+                Some(p) => p.display().to_string(),
+                None => display_url(&request.url),
+            },
             final_host: None,
             file_name: guess,
-            name_warnings: Vec::new(),
+            name_warnings: local_name.map(|n| n.warnings).unwrap_or_default(),
             size: None,
             downloaded: 0,
             speed_bps: 0,
@@ -777,10 +1046,12 @@ impl Inner {
             verdict: None,
             warnings,
             expected_sha256: request.expected_sha256.clone(),
+            checksum_list: request.checksum_url.as_ref().map(display_url),
         };
         let job = Job {
             snap: snap.clone(),
             request,
+            local,
             qid,
             cancel: Arc::new(AtomicBool::new(false)),
             force_link: false,
@@ -958,14 +1229,18 @@ impl Inner {
 
     /// Full pipeline for one job. Returns the final outcome.
     async fn process(self: &Arc<Self>, id: u64) -> Result<Outcome> {
-        let (req, force, cancel, existing_qid) = self.with_job(id, |j| {
+        let (req, force, cancel, existing_qid, local) = self.with_job(id, |j| {
             (
                 j.request.clone(),
                 j.force_link,
                 j.cancel.clone(),
                 j.qid.clone(),
+                j.local.clone(),
             )
         })?;
+        if let Some(path) = local {
+            return self.process_local(id, &path, &cancel).await;
+        }
         let s = self.settings();
         let dest = s
             .destination_dir
@@ -1033,6 +1308,7 @@ impl Inner {
                 }
                 let url = req.url.to_string();
                 let expected = req.expected_sha256.clone();
+                let checksum_url = req.checksum_url.as_ref().map(Url::to_string);
                 let meta = q.create_item(|qid| ItemMeta {
                     id: qid,
                     url,
@@ -1041,6 +1317,7 @@ impl Inner {
                     last_modified: None,
                     total_size: None,
                     expected_sha256: expected,
+                    checksum_url,
                     sha256: None,
                     file_name: "download".into(),
                     name_warnings: vec![],
@@ -1210,43 +1487,42 @@ impl Inner {
             return Ok(Outcome::AlreadyDownloaded { path });
         }
 
-        let vt_file = match &vt {
-            None => VtFileResult::NoApiKey,
-            Some(c) => c.lookup_file(&sha).await,
-        };
-        let clam = clamav::scan(&s.clamav, &path).await;
-        let def = if cfg!(windows) && s.use_defender {
-            match defender::scan(&path).await {
-                // Not installed / disabled (e.g. third-party antivirus): it is an
-                // optional extra engine, so it must not block a Clean verdict.
-                EngineResult::Unavailable(why) => {
-                    self.update(id, |j| {
-                        j.snap
-                            .warnings
-                            .push(format!("Microsoft Defender not used: {why}"))
-                    });
-                    EngineResult::Skipped
+        // Publisher's checksum list given instead of a SHA-256.
+        let mut expected = meta.expected_sha256.clone();
+        let mut checksum_list = None;
+        if let Some(list) = meta
+            .checksum_url
+            .as_deref()
+            .and_then(|u| Url::parse(u).ok())
+        {
+            let mut names = vec![meta.file_name.clone()];
+            for u in [meta.final_url.as_deref(), Some(meta.url.as_str())]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(n) = Url::parse(u).ok().as_ref().and_then(filename_from_url) {
+                    names.push(n);
                 }
-                other => other,
             }
-        } else {
-            EngineResult::Skipped
-        };
-        let report = ScanReport {
-            sha256: sha,
-            expected_sha256: meta.expected_sha256.clone(),
-            virustotal: vt_file,
-            clamav: clam,
-            defender: def,
-        };
-        let verdict = decide(
-            report,
-            Thresholds {
-                vt_dangerous: s.vt_dangerous_threshold,
-                vt_suspicious: s.vt_suspicious_threshold,
-                require_virustotal: s.require_virustotal,
-            },
-        );
+            let (found, result) = self.fetch_checksum_list(&list, &names, &s, &cancel).await;
+            if found.is_some() {
+                expected = found;
+                self.update(id, |j| j.snap.expected_sha256 = expected.clone());
+            }
+            checksum_list = Some(result);
+        }
+        let verdict = self
+            .analyze(
+                id,
+                &path,
+                &meta.file_name,
+                sha,
+                expected,
+                checksum_list,
+                vt.as_deref(),
+                &s,
+            )
+            .await;
         self.update(id, |j| j.snap.verdict = Some(verdict.clone()));
 
         // ---- 4. act on the verdict ----
@@ -1290,6 +1566,332 @@ impl Inner {
                 Ok(Outcome::Quarantined)
             }
         }
+    }
+
+    /// Analyze a local file in place: hash, VirusTotal (hash only), ClamAV,
+    /// Defender, type check. The file is never moved, modified or deleted.
+    async fn process_local(
+        self: &Arc<Self>,
+        id: u64,
+        path: &Path,
+        cancel: &AtomicBool,
+    ) -> Result<Outcome> {
+        let s = self.settings();
+        self.update(id, |j| {
+            j.snap.stage = Stage::Scanning;
+            j.snap.downloaded = 0;
+        });
+        let _scan = self.scan_lock.lock().await;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        let md = tokio::fs::metadata(path)
+            .await
+            .map_err(|e| Error::Policy(format!("cannot read the file: {e}")))?;
+        if !md.is_file() {
+            return Err(Error::Policy("only files can be analyzed".into()));
+        }
+        let size = md.len();
+        self.update(id, |j| j.snap.size = Some(size));
+        let me = self.clone();
+        let hpath = path.to_path_buf();
+        let sha = tokio::task::spawn_blocking(move || {
+            let mut last = 0u64;
+            hash::sha256_file(&hpath, |done| {
+                if done - last >= 32 * MIB || done == size {
+                    last = done;
+                    me.update(id, |j| j.snap.downloaded = done);
+                }
+            })
+        })
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))??;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        let name = self
+            .with_job(id, |j| j.snap.file_name.clone())
+            .unwrap_or_default();
+        let vt = self.vt_client();
+        let verdict = self
+            .analyze(id, path, &name, sha, None, None, vt.as_deref(), &s)
+            .await;
+        self.update(id, |j| {
+            j.snap.downloaded = size;
+            j.snap.verdict = Some(verdict);
+        });
+        Ok(Outcome::Analyzed {
+            path: path.display().to_string(),
+        })
+    }
+
+    /// Run every engine on a file and decide (never opens or executes it).
+    #[allow(clippy::too_many_arguments)]
+    async fn analyze(
+        &self,
+        id: u64,
+        path: &Path,
+        file_name: &str,
+        sha: String,
+        expected_sha256: Option<String>,
+        checksum_list: Option<ChecksumListResult>,
+        vt: Option<&VtClient>,
+        s: &Settings,
+    ) -> Verdict {
+        let vt_file = match vt {
+            None => VtFileResult::NoApiKey,
+            Some(c) => c.lookup_file(&sha).await,
+        };
+        let type_mismatch = {
+            let (p, n) = (path.to_path_buf(), file_name.to_string());
+            tokio::task::spawn_blocking(move || filetype::check_file(&p, &n))
+                .await
+                .ok()
+                .flatten()
+        };
+        let clam = clamav::scan(&s.clamav, path).await;
+        let def = if cfg!(windows) && s.use_defender {
+            match defender::scan(path).await {
+                // Not installed / disabled (e.g. third-party antivirus): it is an
+                // optional extra engine, so it must not block a Clean verdict.
+                EngineResult::Unavailable(why) => {
+                    self.update(id, |j| {
+                        j.snap
+                            .warnings
+                            .push(format!("Microsoft Defender not used: {why}"))
+                    });
+                    EngineResult::Skipped
+                }
+                other => other,
+            }
+        } else {
+            EngineResult::Skipped
+        };
+        let report = ScanReport {
+            sha256: sha,
+            expected_sha256,
+            virustotal: vt_file,
+            clamav: clam,
+            defender: def,
+            checksum_list,
+            type_mismatch,
+        };
+        let verdict = decide(
+            report,
+            Thresholds {
+                vt_dangerous: s.vt_dangerous_threshold,
+                vt_suspicious: s.vt_suspicious_threshold,
+                require_virustotal: s.require_virustotal,
+            },
+        );
+        self.update(id, |j| j.snap.verdict = Some(verdict.clone()));
+        verdict
+    }
+
+    /// Fetch the publisher's checksum list (same network rules as a
+    /// download, size-limited, never written to disk) and find the file.
+    async fn fetch_checksum_list(
+        &self,
+        list: &Url,
+        names: &[String],
+        s: &Settings,
+        cancel: &AtomicBool,
+    ) -> (Option<String>, ChecksumListResult) {
+        let source = display_url(list);
+        let unavailable = |error: String| {
+            (
+                None,
+                ChecksumListResult::Unavailable {
+                    source: source.clone(),
+                    error,
+                },
+            )
+        };
+        if list.scheme() == "http" && !s.allow_http {
+            return unavailable("plain HTTP links are disabled in Settings".into());
+        }
+        let public_only = !host_is_local(list);
+        let client = match build_client(&ClientOptions {
+            connect_timeout: Duration::from_secs(s.connect_timeout_secs),
+            idle_timeout: Duration::from_secs(s.idle_timeout_secs),
+            public_only,
+        }) {
+            Ok(c) => c,
+            Err(e) => return unavailable(e.to_string()),
+        };
+        let no_space_check = |_: &Path| Ok(u64::MAX);
+        let ctx = DownloadContext {
+            client: &client,
+            public_only,
+            allow_http: s.allow_http,
+            max_redirects: s.max_redirects,
+            max_retries: 0,
+            retry_base_delay: self.cfg.retry_base_delay,
+            max_size: Some(checksums::MAX_LIST_SIZE),
+            min_free: 0,
+            space_probe: &no_space_check,
+            cancel,
+            progress: &|_| {},
+        };
+        let mut resp = match download::open(&ctx, list, 0, None).await {
+            Ok((resp, _)) if resp.status().as_u16() == 200 => resp,
+            Ok((resp, _)) => return unavailable(format!("HTTP {}", resp.status().as_u16())),
+            Err(e) => return unavailable(e.to_string()),
+        };
+        if resp
+            .content_length()
+            .is_some_and(|n| n > checksums::MAX_LIST_SIZE)
+        {
+            return unavailable("the checksum list is too large".into());
+        }
+        let mut body = Vec::new();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(s.idle_timeout_secs), resp.chunk()).await
+            {
+                Ok(Ok(Some(c))) => {
+                    body.extend_from_slice(&c);
+                    if body.len() as u64 > checksums::MAX_LIST_SIZE {
+                        return unavailable("the checksum list is too large".into());
+                    }
+                }
+                Ok(Ok(None)) => break,
+                Ok(Err(e)) => return unavailable(crate::error::net_err(e).to_string()),
+                Err(_) => return unavailable("timed out".into()),
+            }
+        }
+        let entries = checksums::parse(&String::from_utf8_lossy(&body));
+        if entries.is_empty() {
+            return unavailable("no SHA-256 found in this file".into());
+        }
+        match checksums::find(&entries, names) {
+            Some(e) => (
+                Some(e.sha256.clone()),
+                ChecksumListResult::Found {
+                    source,
+                    entry: if e.name.is_empty() {
+                        "single checksum".into()
+                    } else {
+                        e.name.clone()
+                    },
+                },
+            ),
+            None => (None, ChecksumListResult::NotListed { source }),
+        }
+    }
+
+    async fn run_recheck(&self) -> Result<RecheckSummary> {
+        let vt = self
+            .vt_client()
+            .ok_or_else(|| Error::Policy("set a VirusTotal API key first".into()))?;
+        let s = self.settings();
+        let candidates: Vec<Candidate> = self
+            .history
+            .lock()
+            .map_err(lock_err)?
+            .delivered_files()
+            .into_iter()
+            .filter_map(|e| {
+                Some(Candidate {
+                    sha256: e.sha256.clone()?,
+                    file_name: e.file_name.clone(),
+                    delivered_path: e.delivered_path.clone()?,
+                    delivered_at: e.at,
+                })
+            })
+            .collect();
+        let all: Vec<String> = candidates.iter().map(|c| c.sha256.clone()).collect();
+        let now = now_unix();
+        let (selected, mut remaining) = self.recheck.lock().map_err(lock_err)?.select(
+            candidates,
+            now,
+            s.recheck_max_per_run as usize,
+        );
+        let mut summary = RecheckSummary::default();
+        let mut failures_in_a_row = 0;
+        let total = selected.len();
+        for (i, c) in selected.into_iter().enumerate() {
+            let found = match vt.lookup_file(&c.sha256).await {
+                VtFileResult::Found {
+                    malicious,
+                    suspicious,
+                    detections,
+                    permalink,
+                    ..
+                } => Some((malicious, suspicious, detections, permalink)),
+                VtFileResult::Unknown => None,
+                VtFileResult::NoApiKey => {
+                    remaining += total - i;
+                    break;
+                }
+                VtFileResult::Failed { error } => {
+                    summary.errors.push(error);
+                    failures_in_a_row += 1;
+                    if failures_in_a_row >= 3 {
+                        remaining += total - i - 1;
+                        break;
+                    }
+                    continue;
+                }
+            };
+            failures_in_a_row = 0;
+            summary.checked += 1;
+            let mut st = self.recheck.lock().map_err(lock_err)?;
+            st.checked.insert(c.sha256.clone(), now_unix());
+            if let Some((malicious, suspicious, detections, permalink)) = found {
+                let level = if malicious >= s.vt_dangerous_threshold {
+                    Some(VerdictLevel::Dangerous)
+                } else if malicious >= s.vt_suspicious_threshold {
+                    Some(VerdictLevel::Suspect)
+                } else {
+                    None
+                };
+                if let Some(level) = level {
+                    let alert = RecheckAlert {
+                        id: c.sha256.clone(),
+                        file_name: c.file_name.clone(),
+                        delivered_path: c.delivered_path.clone(),
+                        delivered_at: c.delivered_at,
+                        found_at: now_unix(),
+                        level,
+                        malicious,
+                        suspicious,
+                        permalink,
+                        detections: detections
+                            .iter()
+                            .filter(|d| d.category == "malicious")
+                            .take(12)
+                            .map(|d| {
+                                format!(
+                                    "{}: {}",
+                                    d.engine,
+                                    d.result.as_deref().unwrap_or("malicious")
+                                )
+                            })
+                            .collect(),
+                        dismissed: false,
+                    };
+                    tracing::warn!(file = %c.file_name, malicious, "delivered file now flagged");
+                    if st.raise(alert) {
+                        summary.new_alerts += 1;
+                    }
+                }
+            }
+            st.save()?;
+        }
+        summary.remaining = u32::try_from(remaining).unwrap_or(u32::MAX);
+        let alerts = {
+            let mut st = self.recheck.lock().map_err(lock_err)?;
+            // A run that could not reach VirusTotal at all is retried later.
+            if summary.checked > 0 || total == 0 {
+                st.last_run = Some(now);
+            }
+            st.retain_checked(&all);
+            st.save()?;
+            summary.last_run = st.last_run;
+            st.active_alerts()
+        };
+        self.sink.recheck_alerts(&alerts);
+        Ok(summary)
     }
 }
 

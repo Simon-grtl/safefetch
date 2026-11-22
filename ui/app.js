@@ -69,6 +69,12 @@
       case "failed": return { icon: "⚠️", label: "Failed", cls: "warn" };
       case "cancelled": return { icon: "⏸️", label: "Cancelled", cls: "muted" };
       case "discarded": return { icon: "🗑️", label: "Deleted by you", cls: "muted" };
+      case "analyzed": {
+        const lvl = j.verdict ? j.verdict.level : "not_analyzed";
+        if (lvl === "clean") return { icon: "✅", label: "Clean — analyzed in place", cls: "ok" };
+        if (lvl === "dangerous") return { icon: "❌", label: "Dangerous — delete this file", cls: "bad" };
+        return { icon: "⚠️", label: `${VERDICT[lvl].label} — analyzed in place`, cls: "warn" };
+      }
       default: return { icon: "•", label: o.kind, cls: "muted" };
     }
   }
@@ -85,7 +91,7 @@
     if (o && o.kind === "blocked") add("Download anyway…", () => {
       if (confirm("VirusTotal flagged this link. Download it into quarantine anyway? It will still be scanned before anything is delivered.")) call("force_download", { id: j.id });
     }, "ghost small danger");
-    if (o && (o.kind === "delivered" || o.kind === "already_downloaded")) add("Show in folder", () => call("reveal_delivered", { id: j.id }));
+    if (o && (o.kind === "delivered" || o.kind === "already_downloaded" || o.kind === "analyzed")) add("Show in folder", () => call("reveal_delivered", { id: j.id }));
     add("Details", () => openDetails(j.id), "small");
     return box;
   }
@@ -104,12 +110,22 @@
       p.max = j.size || 1;
       if (j.size) p.value = j.downloaded; else p.removeAttribute("value");
       meta.append(p, el("span", { text: `${fmtBytes(j.downloaded)} / ${j.size ? fmtBytes(j.size) : "?"}` }), el("span", { text: `${fmtBytes(j.speed_bps)}/s` }));
+    } else if (j.local && j.stage === "scanning" && !j.outcome && j.size) {
+      const p = el("progress");
+      p.max = j.size;
+      p.value = j.downloaded;
+      meta.append(p, el("span", { text: `Hashing ${fmtBytes(j.downloaded)} / ${fmtBytes(j.size)}` }));
     } else if (j.size || j.downloaded) {
       meta.append(el("span", { text: fmtBytes(j.size || j.downloaded) }));
     }
     if (j.outcome && j.outcome.kind === "failed") meta.append(el("span", { cls: "errors", text: j.outcome.error }));
     if (j.outcome && j.outcome.kind === "blocked") meta.append(el("span", { text: j.outcome.reason }));
     if ((j.name_warnings || []).length) meta.append(el("span", { cls: "badge warn", text: "Suspicious file name", title: j.name_warnings.join(", ") }));
+    const tm = j.verdict && j.verdict.report.type_mismatch;
+    if (tm) meta.append(el("span", { cls: `badge ${tm.disguised_program ? "bad" : "warn"}`, text: tm.disguised_program ? "Disguised program" : "Type ≠ extension", title: `.${tm.extension} but really ${tm.detected_label}` }));
+    const cl = j.verdict && j.verdict.report.checksum_list;
+    if (cl && cl.status === "found" && j.verdict.report.expected_sha256 === j.verdict.report.sha256) meta.append(el("span", { cls: "badge ok", text: "Publisher checksum ✓" }));
+    if (j.local) meta.append(el("span", { cls: "badge muted", text: "Local file" }));
     li.append(meta);
     return li;
   }
@@ -149,13 +165,15 @@
     const s = status(j);
     parts.push(el("div", { cls: `verdict-banner ${s.cls}`, text: `${s.icon} ${s.label}` }));
     const v = j.verdict;
+    if (j.local) parts.push(el("p", { cls: "hint", text: "A file of this computer, analyzed where it is. SafeFetch never moves, modifies or deletes it." }));
     parts.push(kv([
-      ["Link", j.display_url],
+      [j.local ? "Location" : "Link", j.display_url],
       ["Final host", j.final_host],
       ["Size", j.size ? fmtBytes(j.size) : null],
       ["SHA-256", v ? v.report.sha256 : null],
       ["Expected SHA-256", j.expected_sha256],
-      ["Result", j.outcome && j.outcome.path ? j.outcome.path : null],
+      ["Checksum list", j.checksum_list],
+      ["Result", j.outcome && j.outcome.path && !j.local ? j.outcome.path : null],
     ]));
     if (v) {
       parts.push(el("h3", { text: "Why" }));
@@ -176,6 +194,13 @@
         for (const d of j.link_check.detections) t.append(el("tr", {}, el("td", { text: d.source }), el("td", { text: d.name })));
         parts.push(t);
       }
+    }
+    if (v && v.report.type_mismatch) {
+      const tm = v.report.type_mismatch;
+      parts.push(el("h3", { text: "File type" }));
+      parts.push(el("p", { text: tm.disguised_program
+        ? `The name ends in .${tm.extension}, but the content is ${tm.detected_label}. Opening it would run a program, not show a document: a classic trick.`
+        : `The name ends in .${tm.extension}, but the content is ${tm.detected_label}. Often harmless (wrong extension), but worth knowing.` }));
     }
     if ((j.name_warnings || []).length) {
       parts.push(el("h3", { text: "File name" }));
@@ -200,6 +225,10 @@
     const btns = [];
     const b = (label, fn, cls = "") => btns.push(el("button", { cls, text: label, type: "button", onclick: fn }));
     if ((v && v.virustotal_link) || (j.link_check && j.link_check.permalink)) b("Open VirusTotal report", () => call("open_virustotal_report", { id: j.id }), "ghost");
+    if (j.outcome && j.outcome.kind === "analyzed") {
+      b("Re-scan", () => call("rescan_job", { id: j.id }), "ghost");
+      b("Show in folder", () => call("reveal_delivered", { id: j.id }), "ghost");
+    }
     if (j.outcome && j.outcome.kind === "quarantined") {
       b("Re-scan", () => call("rescan_job", { id: j.id }), "ghost");
       b("Upload to VirusTotal…", async () => {
@@ -245,18 +274,86 @@
     $("install-help").classList.toggle("hidden", !!(env.clamscan || env.clamd));
     $("setup").classList.toggle("hidden", blocking === 0);
     $("setup-dest").classList.toggle("hidden", !!env.destination);
+    renderSignatureControls();
+  }
+
+  // ---------- ClamAV signatures ----------
+  function renderSignatureControls() {
+    if (!env) return;
+    const sig = env.signature_updates || {};
+    const hasClam = !!(env.clamscan || env.clamd);
+    const serviceOff = sig.service === "inactive";
+    const canTask = env.os === "windows" && sig.scheduled_task === false && hasClam;
+    for (const id of ["setup-service", "s-sig-service"]) $(id).classList.toggle("hidden", !serviceOff);
+    for (const id of ["setup-task", "s-sig-task"]) $(id).classList.toggle("hidden", !canTask);
+    $("s-sig-untask").classList.toggle("hidden", sig.scheduled_task !== true);
+    const lines = [];
+    if (!hasClam) lines.push("ClamAV is not installed.");
+    else if (env.signatures_age_days === null || env.signatures_age_days === undefined) lines.push("No signatures found yet.");
+    else lines.push(`Signatures are ${env.signatures_age_days} day(s) old.`);
+    if (sig.managed) lines.push(`SafeFetch keeps its own copy in ${sig.managed_dir} (updated without administrator rights).`);
+    if (sig.service === "active") lines.push("They are updated automatically by the clamav-freshclam system service.");
+    if (serviceOff) lines.push("The clamav-freshclam system service is installed but not running: enable it to get daily updates.");
+    if (sig.scheduled_task === true) lines.push("A daily Windows Scheduled Task keeps them up to date, even when SafeFetch is closed.");
+    $("s-sig-state").textContent = lines.join(" ");
+  }
+  const SIG_BUTTONS = ["setup-sigs", "setup-service", "setup-task", "s-sig-update", "s-sig-service", "s-sig-task", "s-sig-untask"];
+  async function signatureAction(cmd, args, startMsg) {
+    for (const id of SIG_BUTTONS) $(id).disabled = true;
+    toast(startMsg);
+    const show = (text, ok) => {
+      for (const id of ["setup-sig-msg", "s-sig-msg"]) {
+        $(id).textContent = text;
+        $(id).classList.toggle("hidden", !text);
+        $(id).classList.toggle("errors", !ok);
+      }
+    };
+    try {
+      const out = await invoke(cmd, args);
+      toast("Done.");
+      show(String(out || ""), true);
+    } catch (e) {
+      toast("It did not work — see the message under the buttons.");
+      show(String(e), false);
+    } finally {
+      for (const id of SIG_BUTTONS) $(id).disabled = false;
+      await loadEnv();
+    }
+  }
+  const updateSignatures = () => signatureAction("update_signatures", undefined, "Updating ClamAV signatures… the first download can take a few minutes.");
+  const enableService = () => signatureAction("enable_signature_service", undefined, "Your system will ask for your password…");
+  const scheduleTask = () => signatureAction("schedule_signature_updates", { enable: true }, "Updating signatures, then scheduling a daily update…");
+  const unscheduleTask = () => signatureAction("schedule_signature_updates", { enable: false }, "Removing the scheduled task…");
+
+  // ---------- weekly re-check alerts ----------
+  const fmtDate = (t) => (t ? new Date(t * 1000).toLocaleDateString() : "never");
+  function renderAlerts(alerts) {
+    const list = $("alert-list");
+    list.replaceChildren(...alerts.map((a) => {
+      const li = el("li", { cls: "alert" });
+      const sub = `Delivered ${fmtDate(a.delivered_at)} · now flagged by ${a.malicious} engine(s) (${VERDICT[a.level].label}) · ${a.delivered_path}`;
+      const actions = el("div", { cls: "actions" },
+        el("button", { cls: "ghost small", type: "button", text: "Show in folder", onclick: () => call("reveal_recheck_alert", { id: a.id }) }),
+        el("button", { cls: "ghost small", type: "button", text: "VirusTotal report", onclick: () => call("open_recheck_report", { id: a.id }) }),
+        el("button", { cls: "ghost small", type: "button", text: "Dismiss", onclick: async () => { await call("dismiss_recheck_alert", { id: a.id }); } }),
+      );
+      li.append(el("div", { cls: "name", text: `${VERDICT[a.level].icon} ${a.file_name}` }), actions, el("div", { cls: "sub", text: sub, title: a.detections.join("\n") }));
+      return li;
+    }));
+    $("alerts").classList.toggle("hidden", alerts.length === 0);
+  }
+  async function loadRecheck() {
+    const st = await call("recheck_status");
+    renderAlerts(st.alerts);
+    $("s-recheck-state").textContent = st.running
+      ? "Re-check in progress…"
+      : `Last re-check: ${fmtDate(st.last_run)}${st.has_api_key ? "" : " — needs a VirusTotal API key"}`;
+    return st;
   }
 
   async function chooseDestination() {
     const s = await call("choose_destination");
     if (s) { toast(`Destination: ${s.destination_dir}`); await loadEnv(); await loadSettings(); }
-  }
-  async function updateSignatures(btn) {
-    btn.disabled = true;
-    toast("Updating ClamAV signatures… this can take a few minutes.");
-    try { await invoke("update_signatures"); toast("Signatures updated."); }
-    catch (e) { toast(`Signature update failed: ${e}`); }
-    finally { btn.disabled = false; loadEnv(); }
   }
 
   // ---------- settings ----------
@@ -275,6 +372,9 @@
     $("s-defender").checked = current.use_defender;
     $("s-fresh").checked = current.auto_update_signatures;
     $("s-upd").checked = current.check_app_updates;
+    $("s-recheck").checked = current.weekly_recheck;
+    renderSignatureControls();
+    loadRecheck().catch(() => {});
     const has = await call("has_api_key");
     $("s-key-state").textContent = has ? "A key is stored in the system keychain." : "No key stored.";
   }
@@ -294,6 +394,7 @@
       use_defender: $("s-defender").checked,
       auto_update_signatures: $("s-fresh").checked,
       check_app_updates: $("s-upd").checked,
+      weekly_recheck: $("s-recheck").checked,
     };
     try { current = await invoke("save_settings", { settings: next }); toast("Settings saved."); $("settings").close(); }
     catch (e) { $("s-error").textContent = String(e); }
@@ -315,6 +416,22 @@
     } catch (e) { toast(`Update check failed: ${e}`); }
   });
   $("open-settings").addEventListener("click", async () => { await loadSettings(); $("settings").showModal(); });
+  $("s-sig-update").addEventListener("click", updateSignatures);
+  $("s-sig-service").addEventListener("click", enableService);
+  $("s-sig-task").addEventListener("click", scheduleTask);
+  $("s-sig-untask").addEventListener("click", unscheduleTask);
+  $("s-recheck-now").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    $("s-recheck-state").textContent = "Re-check in progress… (VirusTotal allows 4 lookups per minute)";
+    try {
+      const r = await invoke("recheck_now");
+      const more = r.remaining ? `, ${r.remaining} left for the next run` : "";
+      const errs = r.errors.length ? ` — ${r.errors.length} lookup(s) failed: ${r.errors[0]}` : "";
+      toast(`Re-check done: ${r.checked} file(s) looked up, ${r.new_alerts} new alert(s)${more}${errs}`);
+    } catch (err) { toast(`Re-check failed: ${err}`); }
+    finally { btn.disabled = false; loadRecheck().catch(() => {}); }
+  });
 
   // ---------- input ----------
   $("submit").addEventListener("click", async () => {
@@ -335,15 +452,31 @@
     renderAll();
   });
   $("setup-dest").addEventListener("click", chooseDestination);
-  $("setup-sigs").addEventListener("click", (e) => updateSignatures(e.currentTarget));
+  $("setup-sigs").addEventListener("click", updateSignatures);
+  $("setup-service").addEventListener("click", enableService);
+  $("setup-task").addEventListener("click", scheduleTask);
+
+  // ---------- local files (picker or OS drag-and-drop, both handled in Rust) ----------
+  function reportLocal(r) {
+    if (!r) return;
+    if (r.errors.length) toast(r.errors.join("\n"));
+    else if (r.added.length) toast(`${r.added.length} file(s) added for analysis. They stay where they are.`);
+  }
+  $("pick-local").addEventListener("click", async () => reportLocal(await call("choose_local_files")));
+  // The webview itself never handles dropped files (no navigation either).
+  for (const ev of ["dragover", "drop"]) document.addEventListener(ev, (e) => e.preventDefault());
   $("setup-recheck").addEventListener("click", loadEnv);
 
   // ---------- boot ----------
   (async () => {
     await tauri.event.listen("job-updated", (ev) => { jobs.set(ev.payload.id, ev.payload); scheduleRender(); });
+    await tauri.event.listen("recheck-alerts", (ev) => renderAlerts(ev.payload));
+    await tauri.event.listen("local-submitted", (ev) => reportLocal(ev.payload));
+    await tauri.event.listen("drop-hover", (ev) => $("drop-overlay").classList.toggle("hidden", !ev.payload));
     for (const j of await call("list_jobs")) jobs.set(j.id, j);
     renderAll();
     await loadEnv();
+    loadRecheck().catch(() => {});
     try {
       const s = await invoke("get_settings");
       if (s.check_app_updates) {

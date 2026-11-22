@@ -199,6 +199,13 @@ pub fn find_clamscan() -> Option<PathBuf> {
     safefetch_core::scanners::clamav::find_executable("clamscan")
 }
 
+/// Official ClamAV database to test with instead of the one-signature test
+/// DB (CI job "official ClamAV database"): a folder holding the official
+/// `.cvd`/`.cld` files plus `test.hdb`.
+pub fn official_db() -> Option<PathBuf> {
+    std::env::var_os("SAFEFETCH_CLAMAV_DB").map(PathBuf::from)
+}
+
 /// Custom signature DB: an MD5 hash signature for the EICAR string, so the
 /// tests do not depend on downloading the official ~300 MB database.
 pub fn write_test_db(dir: &Path) -> PathBuf {
@@ -255,7 +262,7 @@ pub fn env_in(dir: tempfile::TempDir, opts: EnvOptions) -> Env {
         ..Default::default()
     };
     s.clamav.mode = ClamAvMode::ClamscanOnly;
-    s.clamav.database_dir = Some(write_test_db(dir.path()));
+    s.clamav.database_dir = Some(official_db().unwrap_or_else(|| write_test_db(dir.path())));
     s.clamav.clamscan_path = find_clamscan();
     // Tests must not depend on the CI runner's Defender state.
     s.use_defender = false;
@@ -294,7 +301,13 @@ pub fn env_in(dir: tempfile::TempDir, opts: EnvOptions) -> Env {
 
 impl Env {
     pub async fn wait(&self, id: u64) -> JobSnapshot {
-        for _ in 0..1200 {
+        // clamscan loads the whole official database for every file.
+        let rounds = if official_db().is_some() {
+            12_000
+        } else {
+            1200
+        };
+        for _ in 0..rounds {
             if let Some(j) = self.engine.job(id) {
                 if j.stage == Stage::Finished && j.outcome.is_some() {
                     return j;

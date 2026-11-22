@@ -108,6 +108,57 @@ jobs:
             echo "::error::dev-connector compiled in release mode"; exit 1
           fi
 
+  # Closes residual risk 2 of SECURITY_AUDIT.md: the whole pipeline suite and
+  # dedicated tests run against the OFFICIAL ClamAV database (~8 million
+  # signatures) instead of the one-signature test database, so the `--debug`
+  # output of a full database can never silently change verdicts.
+  official-clamav-db:
+    name: Tests with the official ClamAV database
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: System dependencies (Tauri + ClamAV)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libdbus-1-dev clamav clamav-freshclam
+          sudo systemctl stop clamav-freshclam || true
+          clamscan --version
+      - name: Week number (signature cache key)
+        id: week
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+      # The ClamAV CDN rate-limits CI runners: reuse this week's download.
+      - uses: actions/cache@v4
+        with:
+          path: ~/clamav-db
+          key: clamav-db-${{ steps.week.outputs.week }}
+          restore-keys: clamav-db-
+      - name: Download the official signatures (as the runner user, no root)
+        run: |
+          D=$HOME/clamav-db; mkdir -p "$D"
+          printf 'DatabaseMirror database.clamav.net\n' > "$RUNNER_TEMP/freshclam.conf"
+          for i in 1 2 3; do
+            freshclam --stdout --config-file="$RUNNER_TEMP/freshclam.conf" --datadir="$D" && break
+            echo "freshclam attempt $i failed"; sleep $((i * 60))
+          done
+          ls -la "$D"
+          ls "$D" | grep -Eq '^main\.c[vl]d$' && ls "$D" | grep -Eq '^daily\.c[vl]d$' \
+            || { echo "::error::official ClamAV database not available"; exit 1; }
+      - name: Pipeline, feature and official-database tests
+        env:
+          SAFEFETCH_REQUIRE_CLAMAV: "1"
+        run: |
+          DB=$RUNNER_TEMP/official-db; mkdir -p "$DB"
+          cp "$HOME"/clamav-db/*.c?d "$DB"/
+          # Also the test signature, so assertions on its name keep working.
+          echo "44d88612fea8a8f36de82e1278abb02f:68:SafeFetch.Test.EICAR" > "$DB/test.hdb"
+          export SAFEFETCH_CLAMAV_DB=$DB
+          # clamscan loads the full database for every file (~1 GiB RAM each).
+          cargo test --release -p safefetch-core --test official_db --test pipeline --test features \
+            -- --test-threads=2 --nocapture
+
   linux-distros:
     name: Test (${{ matrix.name }})
     runs-on: ubuntu-latest

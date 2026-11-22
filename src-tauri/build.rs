@@ -4,6 +4,7 @@ fn main() {
     // the webview. Any command missing from the capability is refused.
     let commands: &[&str] = &[
         "submit_links",
+        "choose_local_files",
         "list_jobs",
         "cancel_job",
         "retry_job",
@@ -15,6 +16,11 @@ fn main() {
         "upload_to_virustotal",
         "open_virustotal_report",
         "reveal_delivered",
+        "recheck_status",
+        "recheck_now",
+        "dismiss_recheck_alert",
+        "reveal_recheck_alert",
+        "open_recheck_report",
         "get_settings",
         "save_settings",
         "choose_destination",
@@ -23,6 +29,8 @@ fn main() {
         "delete_api_key",
         "environment",
         "update_signatures",
+        "enable_signature_service",
+        "schedule_signature_updates",
         "check_app_update",
         "install_app_update",
     ];

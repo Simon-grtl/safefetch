@@ -84,6 +84,19 @@ impl History {
         })
     }
 
+    /// Delivered files that still exist (latest delivery per content), for
+    /// the weekly re-check. Files judged Dangerous were never delivered.
+    pub fn delivered_files(&self) -> Vec<&HistoryEntry> {
+        let mut seen = std::collections::HashSet::new();
+        self.entries
+            .iter()
+            .rev()
+            .filter(|e| e.verdict != VerdictLevel::Dangerous)
+            .filter(|e| e.delivered_path.as_ref().is_some_and(|p| p.is_file()))
+            .filter(|e| e.sha256.as_ref().is_some_and(|s| seen.insert(s.clone())))
+            .collect()
+    }
+
     pub fn clear(&mut self) -> Result<()> {
         self.entries.clear();
         self.save()

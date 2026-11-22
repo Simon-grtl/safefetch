@@ -11,14 +11,43 @@ mod keyring_store;
 
 use std::sync::Arc;
 
+use safefetch_core::recheck::RecheckAlert;
 use safefetch_core::{Engine, EngineConfig, EventSink, JobSnapshot};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, DragDropEvent, Emitter, Manager, WindowEvent};
 
 struct TauriSink(AppHandle);
 
 impl EventSink for TauriSink {
     fn job_updated(&self, job: &JobSnapshot) {
         let _ = self.0.emit_to("main", "job-updated", job);
+    }
+    fn recheck_alerts(&self, alerts: &[RecheckAlert]) {
+        let _ = self.0.emit_to("main", "recheck-alerts", alerts);
+    }
+}
+
+/// Files dropped on the window come from the OS drag-and-drop, handled here
+/// in Rust: the webview never sees or sends the paths (HTML5 file drops are
+/// disabled while Tauri's drag-and-drop handler is on, its default).
+fn on_drag_drop(window: &tauri::Window, event: &DragDropEvent) {
+    if window.label() != "main" {
+        return;
+    }
+    match event {
+        DragDropEvent::Enter { .. } => {
+            let _ = window.emit_to("main", "drop-hover", true);
+        }
+        DragDropEvent::Leave => {
+            let _ = window.emit_to("main", "drop-hover", false);
+        }
+        DragDropEvent::Drop { paths, .. } => {
+            let _ = window.emit_to("main", "drop-hover", false);
+            if let Some(engine) = window.try_state::<Engine>() {
+                let result = engine.submit_local(paths.clone());
+                let _ = window.emit_to("main", "local-submitted", result);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -65,10 +94,13 @@ fn main() {
     let result = builder
         .setup(|app| {
             let config_dir = app.path().app_config_dir()?;
+            let data_dir = app.path().app_local_data_dir()?;
             let sink = Arc::new(TauriSink(app.handle().clone()));
             let engine = tauri::async_runtime::block_on(async move {
+                let mut cfg = EngineConfig::new(config_dir);
+                cfg.data_dir = data_dir;
                 Engine::new(
-                    EngineConfig::new(config_dir),
+                    cfg,
                     Arc::new(keyring_store::KeyringStore),
                     sink,
                     tokio::runtime::Handle::current(),
@@ -78,8 +110,14 @@ fn main() {
             app.manage(engine);
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if let WindowEvent::DragDrop(e) = event {
+                on_drag_drop(window, e);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::submit_links,
+            commands::choose_local_files,
             commands::list_jobs,
             commands::cancel_job,
             commands::retry_job,
@@ -91,6 +129,11 @@ fn main() {
             commands::upload_to_virustotal,
             commands::open_virustotal_report,
             commands::reveal_delivered,
+            commands::recheck_status,
+            commands::recheck_now,
+            commands::dismiss_recheck_alert,
+            commands::reveal_recheck_alert,
+            commands::open_recheck_report,
             commands::get_settings,
             commands::save_settings,
             commands::choose_destination,
@@ -99,6 +142,8 @@ fn main() {
             commands::delete_api_key,
             commands::environment,
             commands::update_signatures,
+            commands::enable_signature_service,
+            commands::schedule_signature_updates,
             commands::check_app_update,
             commands::install_app_update,
         ])

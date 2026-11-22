@@ -659,38 +659,6 @@ pub async fn version(s: &ClamAvSettings) -> Option<String> {
     (!v.is_empty()).then_some(v)
 }
 
-/// Run freshclam (signature update). Returns its output for display.
-pub async fn update_signatures(s: &ClamAvSettings) -> Result<String, String> {
-    let exe = s
-        .freshclam_path
-        .clone()
-        .or_else(|| find_executable("freshclam"))
-        .ok_or("freshclam not found")?;
-    let mut cmd = tokio::process::Command::new(exe);
-    crate::fsutil::no_console_window(&mut cmd);
-    cmd.arg("--stdout").stdin(Stdio::null()).kill_on_drop(true);
-    let out = tokio::time::timeout(Duration::from_secs(900), cmd.output())
-        .await
-        .map_err(|_| "freshclam timed out".to_string())?
-        .map_err(|e| format!("cannot run freshclam: {e}"))?;
-    let text =
-        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
-    let tail: String = text
-        .lines()
-        .rev()
-        .take(8)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n");
-    if out.status.success() {
-        Ok(tail)
-    } else {
-        Err(tail)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

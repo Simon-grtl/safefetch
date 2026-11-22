@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-enable-signature-service"
+description = "Enables the enable_signature_service command without any pre-configured scope."
+commands.allow = ["enable_signature_service"]
+
+[[permission]]
+identifier = "deny-enable-signature-service"
+description = "Denies the enable_signature_service command without any pre-configured scope."
+commands.deny = ["enable_signature_service"]

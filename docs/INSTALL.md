@@ -10,6 +10,8 @@ these steps if it is missing.
 1. Download the ClamAV installer (`clamav-x.y.z.win.x64.msi`) from https://www.clamav.net/downloads and install it (default: `C:\Program Files\ClamAV`).
 2. In that folder, copy `conf_examples\freshclam.conf.sample` to `freshclam.conf`, open it and delete the line `Example`.
 3. Run `freshclam.exe` once (as administrator if it was installed for all users). SafeFetch then refreshes signatures daily while it runs.
+
+**Simpler: skip steps 2–3.** Click **Update ClamAV signatures** in SafeFetch. If the system-wide update needs administrator rights or `freshclam.conf` is missing, SafeFetch downloads its own copy of the signatures into `%LOCALAPPDATA%\io.github.safefetch.app\clamav` (about 300 MB, no administrator rights) and scans with it. **Schedule daily updates** then creates a Windows Scheduled Task (“SafeFetch - ClamAV signature update”, runs as you, daily, catches up after a missed day) so signatures stay fresh while SafeFetch is closed. It can be removed from SafeFetch's settings or from Task Scheduler.
 4. Microsoft Defender is used in addition, automatically, if present.
 
 ### macOS
@@ -35,7 +37,7 @@ sudo freshclam
 sudo systemctl enable --now clamav-freshclam.service   # daily signature updates
 ```
 > **Arch / CachyOS and OpenSSL 4.** Arch is rebuilding its packages on OpenSSL 4 (`clamav 1.5.4-2` is in staging as of November 2026). ClamAV 1.5 does not work with OpenSSL 4 yet ([Cisco-Talos/clamav#1887](https://github.com/Cisco-Talos/clamav/issues/1887)). If that update reaches you before a fix, SafeFetch will show every file as "Not analyzed" with the message "this ClamAV build cannot compute file hashes": nothing is wrongly marked Clean, but nothing can be scanned until a fixed `clamav` package is released.
-On Linux the system service owns the signature database, so the in-app "Update signatures" button may fail without root: that is expected, the service does it.
+On Linux the system service owns the signature database. SafeFetch sees whether the `clamav-freshclam` service is running: if it is, there is nothing to do; if it is installed but stopped, **Settings → ClamAV signatures → Enable automatic updates** (or the same button on the start screen) runs `systemctl enable --now clamav-freshclam.service` through `pkexec`, which asks for your password.
 
 ### clamd (fallback only)
 SafeFetch always prefers `clamscan`, because only clamscan lets it detect archive content that ClamAV silently skipped. clamd is used only when clamscan is not installed, and even then archives/installers scanned by clamd are reported "Not analyzed". clamd is used only if its `clamd.conf` is readable, has no `Scan... no` option, and contains:
@@ -81,6 +83,13 @@ The key is stored through the Secret Service API (GNOME Keyring, or KWallet on K
 
 ## Settings file
 `settings.json` in the app config folder (`%APPDATA%\io.github.safefetch.app`, `~/Library/Application Support/io.github.safefetch.app`, `~/.config/io.github.safefetch.app`). Advanced options that are intentionally **not** editable from the UI: `clamav.clamscan_path`, `clamav.freshclam_path`, `clamav.clamd_address`, `clamav.clamd_conf_path`, ClamAV limits, `quarantine_dir`.
+
+## For maintainers: changing the version
+One command updates every file that carries the version (`Cargo.toml`, `Cargo.lock`, `src-tauri/tauri.conf.json`, `packaging/arch/PKGBUILD`), on any OS:
+```bash
+cargo bump 0.2.0
+```
+It prints the commit/tag commands to run next. `cargo bump --check v0.2.0` verifies the files; the release workflow runs it and refuses a tag that does not match.
 
 ## For maintainers: signed releases
 1. `cargo tauri signer generate -w safefetch.key` (keep the private key and password secret).

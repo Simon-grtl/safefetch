@@ -7,6 +7,7 @@
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "allow-submit-links",
+    "allow-choose-local-files",
     "allow-list-jobs",
     "allow-cancel-job",
     "allow-retry-job",
@@ -18,6 +19,11 @@
     "allow-upload-to-virustotal",
     "allow-open-virustotal-report",
     "allow-reveal-delivered",
+    "allow-recheck-status",
+    "allow-recheck-now",
+    "allow-dismiss-recheck-alert",
+    "allow-reveal-recheck-alert",
+    "allow-open-recheck-report",
     "allow-get-settings",
     "allow-save-settings",
     "allow-choose-destination",
@@ -26,6 +32,8 @@
     "allow-delete-api-key",
     "allow-environment",
     "allow-update-signatures",
+    "allow-enable-signature-service",
+    "allow-schedule-signature-updates",
     "allow-check-app-update",
     "allow-install-app-update"
   ]

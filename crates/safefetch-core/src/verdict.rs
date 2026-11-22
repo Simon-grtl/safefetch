@@ -60,6 +60,12 @@ pub struct ScanReport {
     pub virustotal: VtFileResult,
     pub clamav: EngineResult,
     pub defender: EngineResult,
+    /// The publisher's checksum list given instead of a SHA-256, if any.
+    #[serde(default)]
+    pub checksum_list: Option<crate::checksums::ChecksumListResult>,
+    /// The content does not match the file name's extension.
+    #[serde(default)]
+    pub type_mismatch: Option<crate::filetype::TypeMismatch>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -101,6 +107,9 @@ pub struct Verdict {
 /// | VirusTotal ≥ dangerous threshold            | Dangerous    |
 /// | VirusTotal ≥ suspicious threshold           | Suspect      |
 /// | Expected SHA-256 ≠ computed SHA-256         | Suspect      |
+/// | File missing from the publisher's checksums | Suspect      |
+/// | Program disguised as a document/media file  | Suspect      |
+/// | Publisher's checksum list unavailable       | Not analyzed |
 /// | A local scan hit a limit, failed or missing | Not analyzed |
 /// | No signal and local scans complete          | Clean        |
 pub fn decide(report: ScanReport, t: Thresholds) -> Verdict {
@@ -198,14 +207,51 @@ pub fn decide(report: ScanReport, t: Thresholds) -> Verdict {
         }
     }
 
+    use crate::checksums::ChecksumListResult;
+    let list_source = match &report.checksum_list {
+        Some(ChecksumListResult::Found { source, entry }) => {
+            Some(format!(" (\"{entry}\" in {source})"))
+        }
+        Some(ChecksumListResult::NotListed { source }) => {
+            raise(VerdictLevel::Suspect, &mut level);
+            reasons.push(format!(
+                "The publisher's checksum list ({source}) does not mention this file: it cannot be verified"
+            ));
+            None
+        }
+        Some(ChecksumListResult::Unavailable { source, error }) => {
+            raise(VerdictLevel::NotAnalyzed, &mut level);
+            reasons.push(format!(
+                "The publisher's checksum list ({source}) could not be read: {error}"
+            ));
+            None
+        }
+        None => None,
+    };
     if let Some(expected) = &report.expected_sha256 {
+        let from = list_source.as_deref().unwrap_or("");
         if crate::hash::digests_equal(expected, &report.sha256) {
-            reasons.push("SHA-256 matches the expected checksum".into());
+            reasons.push(format!("SHA-256 matches the expected checksum{from}"));
         } else {
             raise(VerdictLevel::Suspect, &mut level);
             reasons.push(format!(
-                "SHA-256 mismatch: expected {expected}, got {} — the file is not the one you expected",
+                "SHA-256 mismatch: expected {expected}{from}, got {} — the file is not the one you expected",
                 report.sha256
+            ));
+        }
+    }
+
+    if let Some(m) = &report.type_mismatch {
+        if m.disguised_program {
+            raise(VerdictLevel::Suspect, &mut level);
+            reasons.push(format!(
+                "The name ends in .{} but the file is really {}: a program disguised as a harmless file is a classic trick",
+                m.extension, m.detected_label
+            ));
+        } else {
+            reasons.push(format!(
+                "The extension .{} does not match the content, which is {}",
+                m.extension, m.detected_label
             ));
         }
     }
@@ -254,6 +300,8 @@ mod tests {
             virustotal: vt,
             clamav: clam,
             defender: EngineResult::Skipped,
+            checksum_list: None,
+            type_mismatch: None,
         }
     }
 
@@ -402,5 +450,59 @@ mod tests {
             .level,
             VerdictLevel::Clean
         );
+    }
+
+    #[test]
+    fn checksum_list_outcomes() {
+        use crate::checksums::ChecksumListResult;
+        let mut r = report(EngineResult::Clean, VtFileResult::Unknown, Some("aa"));
+        r.checksum_list = Some(ChecksumListResult::Found {
+            source: "https://e.example/SHA256SUMS".into(),
+            entry: "x.iso".into(),
+        });
+        let v = decide(r, T);
+        assert_eq!(v.level, VerdictLevel::Clean);
+        assert!(v.reasons.iter().any(|r| r.contains("SHA256SUMS")));
+        let mut r = report(EngineResult::Clean, VtFileResult::Unknown, None);
+        r.checksum_list = Some(ChecksumListResult::NotListed { source: "s".into() });
+        assert_eq!(decide(r, T).level, VerdictLevel::Suspect);
+        let mut r = report(EngineResult::Clean, VtFileResult::Unknown, None);
+        r.checksum_list = Some(ChecksumListResult::Unavailable {
+            source: "s".into(),
+            error: "HTTP 404".into(),
+        });
+        assert_eq!(decide(r, T).level, VerdictLevel::NotAnalyzed);
+        // A matching publisher checksum never turns an unscanned file Clean.
+        let mut r = report(
+            EngineResult::NotScanned("2 GiB".into()),
+            VtFileResult::Unknown,
+            Some("aa"),
+        );
+        r.checksum_list = Some(ChecksumListResult::Found {
+            source: "s".into(),
+            entry: "x.iso".into(),
+        });
+        assert_eq!(decide(r, T).level, VerdictLevel::NotAnalyzed);
+    }
+
+    #[test]
+    fn disguised_program_is_suspect() {
+        use crate::filetype::{Kind, TypeMismatch};
+        let mut r = report(EngineResult::Clean, VtFileResult::Unknown, None);
+        r.type_mismatch = Some(TypeMismatch {
+            extension: "pdf".into(),
+            detected: Kind::WindowsProgram,
+            detected_label: Kind::WindowsProgram.label().into(),
+            disguised_program: true,
+        });
+        assert_eq!(decide(r, T).level, VerdictLevel::Suspect);
+        let mut r = report(EngineResult::Clean, VtFileResult::Unknown, None);
+        r.type_mismatch = Some(TypeMismatch {
+            extension: "jpg".into(),
+            detected: Kind::Png,
+            detected_label: Kind::Png.label().into(),
+            disguised_program: false,
+        });
+        assert_eq!(decide(r, T).level, VerdictLevel::Clean);
     }
 }

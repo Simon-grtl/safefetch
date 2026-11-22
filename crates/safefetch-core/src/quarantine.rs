@@ -37,6 +37,9 @@ pub struct ItemMeta {
     pub last_modified: Option<String>,
     pub total_size: Option<u64>,
     pub expected_sha256: Option<String>,
+    /// Publisher's checksum list given instead of a SHA-256.
+    #[serde(default)]
+    pub checksum_url: Option<String>,
     pub sha256: Option<String>,
     pub file_name: String,
     #[serde(default)]
@@ -237,6 +240,7 @@ mod tests {
             last_modified: None,
             total_size: None,
             expected_sha256: None,
+            checksum_url: None,
             sha256: None,
             file_name: "a".into(),
             name_warnings: vec![],

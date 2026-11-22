@@ -1,9 +1,13 @@
 //! The ONLY functions the webview can call. Each takes typed, validated
-//! arguments (job ids, settings struct); none accepts a path, a URL to open,
-//! a command line or a file to read. Paths come from the native picker and
-//! URLs to open are rebuilt from validated data on the Rust side.
+//! arguments (job ids, settings struct, alert ids checked as SHA-256); none
+//! accepts a path, a URL to open, a command line or a file to read. Paths
+//! come from the native pickers or an OS drag-and-drop (handled in main.rs),
+//! and URLs to open are rebuilt from validated data on the Rust side.
 
-use safefetch_core::engine::{EnvironmentStatus, JobSnapshot, SubmitResult};
+use safefetch_core::engine::{
+    EnvironmentStatus, JobSnapshot, LocalSubmitResult, RecheckStatus, SubmitResult,
+};
+use safefetch_core::recheck::RecheckSummary;
 use safefetch_core::settings::UiSettings;
 use safefetch_core::{Engine, Error};
 use serde::Serialize;
@@ -22,6 +26,29 @@ pub async fn submit_links(engine: State<'_, Engine>, text: String) -> CmdResult<
         return Err(Error::Policy("too much text pasted at once".into()));
     }
     Ok(engine.submit(&text))
+}
+
+/// Analyze files of this computer: the files are chosen in the OS picker
+/// shown by Rust (the webview only asks for the picker to open).
+#[tauri::command]
+pub async fn choose_local_files(
+    app: AppHandle,
+    engine: State<'_, Engine>,
+) -> CmdResult<Option<LocalSubmitResult>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("Choose files to analyze (they are not moved or modified)")
+        .pick_files(move |p| {
+            let _ = tx.send(p);
+        });
+    let picked = rx.await.map_err(|e| Error::Internal(e.to_string()))?;
+    let Some(files) = picked else { return Ok(None) };
+    let paths = files
+        .into_iter()
+        .filter_map(|f| f.into_path().ok())
+        .collect();
+    Ok(Some(engine.submit_local(paths)))
 }
 
 #[tauri::command]
@@ -99,8 +126,12 @@ pub async fn open_virustotal_report(
     id: u64,
 ) -> CmdResult<()> {
     let link = engine.virustotal_link(id).ok_or(Error::NotFound)?;
-    // Only VirusTotal report pages, rebuilt and checked here.
-    let url = url::Url::parse(&link).map_err(|_| Error::NotFound)?;
+    open_virustotal(&app, &link)
+}
+
+/// Only VirusTotal report pages, rebuilt and checked here.
+fn open_virustotal(app: &AppHandle, link: &str) -> CmdResult<()> {
+    let url = url::Url::parse(link).map_err(|_| Error::NotFound)?;
     if url.scheme() != "https"
         || url.host_str() != Some("www.virustotal.com")
         || !url.path().starts_with("/gui/")
@@ -114,17 +145,81 @@ pub async fn open_virustotal_report(
         .map_err(|e| Error::Internal(e.to_string()))
 }
 
-/// Show a delivered file in the file manager (never opens/executes it).
+/// Show a delivered file (or an analyzed local file) in the file manager.
+/// Never opens or executes it.
 #[tauri::command]
 pub async fn reveal_delivered(app: AppHandle, engine: State<'_, Engine>, id: u64) -> CmdResult<()> {
-    let path = engine.delivered_path(id).ok_or(Error::NotFound)?;
-    let dest = engine.settings().destination_dir.ok_or(Error::NotFound)?;
-    if path.parent() != Some(dest.as_path()) {
-        return Err(Error::Policy("not a delivered file".into()));
+    let path = match engine.local_path(id) {
+        Some(p) => p,
+        None => {
+            let path = engine.delivered_path(id).ok_or(Error::NotFound)?;
+            let dest = engine.settings().destination_dir.ok_or(Error::NotFound)?;
+            if path.parent() != Some(dest.as_path()) {
+                return Err(Error::Policy("not a delivered file".into()));
+            }
+            path
+        }
+    };
+    if !path.is_file() {
+        return Err(Error::Policy("the file no longer exists".into()));
     }
     app.opener()
         .reveal_item_in_dir(&path)
         .map_err(|e| Error::Internal(e.to_string()))
+}
+
+// ---- weekly re-check of delivered files ----
+
+fn alert_id(id: &str) -> CmdResult<&str> {
+    if id.len() == 64 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        Ok(id)
+    } else {
+        Err(Error::Policy("invalid alert id".into()))
+    }
+}
+
+#[tauri::command]
+pub async fn recheck_status(engine: State<'_, Engine>) -> CmdResult<RecheckStatus> {
+    Ok(engine.recheck_status())
+}
+
+#[tauri::command]
+pub async fn recheck_now(engine: State<'_, Engine>) -> CmdResult<RecheckSummary> {
+    engine.recheck_now().await
+}
+
+#[tauri::command]
+pub async fn dismiss_recheck_alert(engine: State<'_, Engine>, id: String) -> CmdResult<()> {
+    engine.dismiss_recheck_alert(alert_id(&id)?)
+}
+
+#[tauri::command]
+pub async fn reveal_recheck_alert(
+    app: AppHandle,
+    engine: State<'_, Engine>,
+    id: String,
+) -> CmdResult<()> {
+    let alert = engine
+        .recheck_alert(alert_id(&id)?)
+        .ok_or(Error::NotFound)?;
+    if !alert.delivered_path.is_file() {
+        return Err(Error::Policy("the file no longer exists".into()));
+    }
+    app.opener()
+        .reveal_item_in_dir(&alert.delivered_path)
+        .map_err(|e| Error::Internal(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn open_recheck_report(
+    app: AppHandle,
+    engine: State<'_, Engine>,
+    id: String,
+) -> CmdResult<()> {
+    let alert = engine
+        .recheck_alert(alert_id(&id)?)
+        .ok_or(Error::NotFound)?;
+    open_virustotal(&app, &alert.permalink)
 }
 
 #[tauri::command]
@@ -183,6 +278,21 @@ pub async fn environment(engine: State<'_, Engine>) -> CmdResult<EnvironmentStat
 #[tauri::command]
 pub async fn update_signatures(engine: State<'_, Engine>) -> Result<String, String> {
     engine.update_signatures().await
+}
+
+/// Linux: enable the clamav-freshclam service (polkit password prompt).
+#[tauri::command]
+pub async fn enable_signature_service(engine: State<'_, Engine>) -> Result<String, String> {
+    engine.enable_signature_service().await
+}
+
+/// Windows: create (enable = true) or remove the daily Scheduled Task.
+#[tauri::command]
+pub async fn schedule_signature_updates(
+    engine: State<'_, Engine>,
+    enable: bool,
+) -> Result<String, String> {
+    engine.schedule_signature_updates(enable).await
 }
 
 #[derive(Serialize)]
