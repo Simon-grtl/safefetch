@@ -1,0 +1,811 @@
+# CLI Command Reference
+
+Complete reference for the `tauri-connector` CLI binary. Commands resolve the connection as `--host/--port` > `TAURI_CONNECTOR_*` env > nearby `.connector.json` > port scan. Every command (not only `status`) accepts a live `.connector.json` found under the working directory or its ancestors (including `src-tauri/target`) once the endpoint proves it is that process, even when the app runs from another directory; from an unrelated directory it selects the single verified running app and reports `ambiguous_app` when there are several. `--app-id`, `--app-instance-id` and `--pid-file` never fall back. **Apps outside `target/` (0.17.8+):** a packaged bundle launched with `open` (cwd `/`, launchd PATH, executable not under a `target/` directory) writes its `.connector.json` to its app data dir, `<app data>/<identifier>/.tauri-connector/.connector.json` (`~/Library/Application Support` on macOS, `%APPDATA%` on Windows, `$XDG_DATA_HOME` or `~/.local/share` on Linux; override with `TAURI_CONNECTOR_APP_DATA_ROOT`). Every command, `status` and `doctor` read live records there from any directory and treat them like port-scan hits (not as nearby files); records of exited apps there are ignored. Before 0.17.8 such an app was found only when its port was inside the scan range. An app that refuses identity because it needs a workflow token is now listed by `status` as `unauthorized` and reported as `unauthorized: ... TAURI_CONNECTOR_WORKFLOW_TOKEN` instead of `app_not_found`, and a bare `app_not_found` names the PID-file locations, app data dir and port range it checked. A nearby `.connector.json` whose process is dead, or whose port now answers as another process, blocks the single-app fallback (0.17.5+): the command fails with `stale_pid_file`, naming the record and any app the port scan found instead, rather than attaching to an unrelated app. It still attaches to a scanned app with the record's app id. Restart the app (it rewrites the record), delete the stale file, pass `--app-id`/`--port`, or opt in with `--any-app` (`TAURI_CONNECTOR_ANY_APP=1`, also honoured by the standalone MCP server).
+
+**Projects (0.17.5+).** Several apps (R2, GFIT Workout, Hub, git-strata-gui) share the default ports 9555/9556, so each 0.17.5 plugin reports its project: `projectName` (the builder's `project_name(..)`, else `productName`, else the Cargo package, else the directory name), `projectRoot` (the directory holding `src-tauri`) and `cargoPackage`, in `identity` and in `.connector.json`. `--project <name>` (or `TAURI_CONNECTOR_PROJECT`) selects the instance whose project name, Cargo package, app name, app id, root directory name or absolute root matches (case-insensitive) and fails with `project_mismatch`, listing the running projects, when none does. Without it, a command run inside a Tauri project (a directory with `src-tauri/` or `tauri.conf.json`) refuses the only running app when that app reports a different project root, and names the `--project`/`--port`/`--any-app` way out. Plugins older than 0.17.5 report no project and show `unknown project`; they are never refused for it.
+
+Install: `brew install dickwu/tap/tauri-connector` or `cargo build -p connector-cli --release`
+
+## Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `TAURI_CONNECTOR_HOST` | `127.0.0.1` | Plugin WebSocket host |
+| `TAURI_CONNECTOR_PORT` | discovered | Plugin WebSocket port (the `--port` default). In the **app's** environment (0.17.7+) it is the exact WS port the plugin binds, failing startup when busy |
+| `TAURI_CONNECTOR_MCP_PORT` | | App env (0.17.7+): exact MCP HTTP port; `doctor` also uses it for `.mcp.json` fix lines when no `.connector.json` is found |
+| `TAURI_CONNECTOR_BRIDGE_PORT` | | App env (0.17.7+): exact internal bridge port |
+| `TAURI_CONNECTOR_PORT_RANGE` / `_MCP_PORT_RANGE` / `_BRIDGE_PORT_RANGE` | 9555-9655 / 9556-9656 / 9300-9400 | `START-END` scan ranges (app listeners; the CLI's discovery scan for the WS range). An exact port wins over a range |
+| `TAURI_CONNECTOR_PID_FILE` | | Explicit `.connector.json` path |
+| `TAURI_CONNECTOR_APP_DATA_ROOT` | | Directory searched for `<identifier>/.tauri-connector/.connector.json` records of apps outside `target/` (0.17.8+; default: the platform app data dir) |
+| `TAURI_CONNECTOR_APP_ID` | | Filter discovered instances by app identifier |
+| `TAURI_CONNECTOR_PROJECT` | | Select the instance belonging to this project (CLI `--project`; also read by `tauri-connector-mcp`) |
+| `TAURI_CONNECTOR_ANY_APP` | | `1` lets discovery attach to an unrelated port-scanned app when a nearby `.connector.json` is stale (CLI `--any-app`) |
+| `TAURI_CONNECTOR_WORKFLOW_TOKEN` | | Host token (>= 32 bytes) for workflows; rich inspection/picker/capture APIs need it only when the host configured one |
+
+---
+
+## Connection
+
+```bash
+tauri-connector status
+tauri-connector status --json
+tauri-connector --project R2 status
+tauri-connector --app-id com.example.app logs -l error
+tauri-connector --window-id settings snapshot -i
+tauri-connector --pid-file src-tauri/target/.connector.json snapshot -i
+tauri-connector bridge
+```
+
+`status` lists live and stale candidates, plus every verified app answering on ports 9555–9655 (`file=(port scan)`), with `project="<name>"` and `plugin=<version>` per row (`unknown project` and `<0.17.5 (unreported)` for older plugins), even when it cannot pick one; the connected app's project, name, id and plugin version, and the discovery error when nothing connects (`resolveError` in `--json`). **Exit codes (0.17.6+):** `status` exits `0` when it selected an app and `1` when it could not (`connected: none`, `ambiguous_app`, `project_mismatch`, ...), the same as `windows`, `eval` and every other command; the full report is printed either way, so read `resolveError` rather than the exit code alone. Before 0.17.6 `status` always exited `0`. **Version warnings (0.17.6+):** `status` (`versionWarnings` in `--json`, `warning:` lines otherwise) and `doctor` warn with a fix when several `tauri-connector` binaries on PATH report different versions (`multiple_cli_versions`, e.g. an old `~/.cargo/bin` copy shadowing Homebrew), when the CLI and the connected app's plugin versions differ (`cli_plugin_version_mismatch`; since 0.17.9 the fix reads the app's `Cargo.lock` and suggests `cargo update -p tauri-plugin-connector -p connector-client --precise 0.17.10` for crates.io, with one shared `--precise`; git dependencies omit it, and path dependencies update their checkout. Review the lockfile diff; new requirements can still require transitive changes), and when the local `dickwu/homebrew-tap` formula is behind (`homebrew_tap_stale`: run `brew update` before `brew upgrade`). `identity` returns `appId`, `appName`, `appVersion`, `pluginVersion`, the instance id and protocol versions; for a plugin older than 0.17.5 it prints `pluginVersion: null` with a `pluginVersionNote`. `bridge` shows connected webviews, pending evals, whether eval fallback is available (`fallbackAvailable`), and `workflowProtocolVersion` (`1` on plugins >= 0.15; the CLI checks it before sending any `workflow` request). `--window-id` is global and scopes snapshots, refs, interactions, screenshots, logs, and window operations to a specific Tauri window label.
+
+---
+
+## Authenticated inspection and active picker
+
+New clients require `inspectionProtocolVersion:1`; an older plugin reports unsupported. Never bypass that response with arbitrary page JavaScript. Bind explicit `--app-id`, `--app-instance-id`, endpoint and workspace/discovery context before collecting rich evidence. A conflicting explicit identity fails instead of switching to another running application.
+
+```bash
+tauri-connector --app-instance-id <verified-instance> identity
+tauri-connector --window main runtime-health --depth runtime --timeout-ms 2000
+tauri-connector --window main picker start --request-key isolated-pick-1 --timeout-ms 60000
+tauri-connector picker get <picker-id> --wait-ms 10000
+tauri-connector picker cancel <picker-id>
+tauri-connector --window main select-element --request-key isolated-pick-2 --timeout-ms 60000
+```
+
+On macOS, `status` prints a warning and `status --json` sets `screenLocked: true` while the screen is locked (0.17.8+); `runtime-health` then concludes `screen_locked` instead of an unresponsive page, and request timeouts append the same note. The app is throttled, not dead: unlock the screen and retry. Since 0.17.9 screenshots fail promptly with primary `screen_locked` before any runtime probe, focus or native capture, across all sources and the default legacy fallback; captures interrupted by a newly locked screen are cancelled as read-only. Eval refusals lead with `screen_locked`, never a suggestion to rerun `--bring-to-front`. Already-dispatched writes retain their uncertain outcome.
+
+`--window` aliases global `--window-id`. `picker start` returns immediately by default; `select-element` starts a real picker and waits up to 10000 ms by default. `--wait-ms` changes only response waiting, and never extends the picker deadline. Start/select accept `--no-screenshot`; do not combine it with explicit `--screenshot-source`. Source values are `auto`, `webview_native`, `window_native`, and `dom_rendering`. Retained get/cancel derive their target from the stored context.
+
+Credentials come from `TAURI_CONNECTOR_WORKFLOW_TOKEN` and are never printed or passed in process arguments. Picker stdout is a JSON report; user guidance belongs on stderr. Selected and successful explicit cancellation exit 0; a still-pending selection exits 2; failed, expired, invalidated and unsuccessful operations exit 1. A screenshot warning can accompany a successful selected result. Poll the same handle; after an uncertain start response, reuse the same key/options instead of creating another request. Candidates require current-context and strict semantic revalidation before any later action.
+
+```bash
+tauri-connector ipc capture start --result-policy preview --argument-policy metadata --commands fixture_save
+tauri-connector ipc capture status <capture-session-id>
+tauri-connector ipc query <capture-session-id> --limit 100 --max-bytes 32768
+tauri-connector ipc capture stop <capture-session-id>
+```
+
+Preview requires the host command/path allowlists (`TAURI_CONNECTOR_CAPTURE_PREVIEW_COMMANDS` and `TAURI_CONNECTOR_CAPTURE_PREVIEW_PATHS`); the client cannot grant itself preview access. Capture start also accepts `--follow-pages`; query supports `--cursor <nextCursor>` (an opaque string from the previous query, never a numeric offset), `--invocation-id`, and `--phase started|succeeded|failed`. Separate sessions do not clear each other. Inspect readiness, drop counts, gaps, pending and coverage; invoke success does not prove business persistence or causal association with a workflow step. Picker/capture/health never rewrite immutable workflow specs, original verdicts or quarantine.
+
+---
+
+## Bundled Skills
+
+The CLI embeds the current `tauri-connector` skill docs, including references.
+
+```bash
+tauri-connector skills list
+tauri-connector skills get tauri-connector
+tauri-connector skills get mcp-tools
+tauri-connector skills path references/mcp-tools.md
+```
+
+`skills get` prints content to stdout. `skills path` materializes the bundled file under the CLI cache and prints the path; use it when an agent needs an actual filesystem path.
+
+---
+
+## DOM & Inspection
+
+### snapshot
+
+Take a DOM snapshot with optional ref IDs for interactive elements.
+
+```bash
+tauri-connector snapshot [FLAGS]
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--interactive` | `-i` | false | Assign `@eN` refs to interactive elements |
+| `--compact` | `-c` | false | Only show lines containing refs (subtree file markers are preserved) |
+| `--depth` | `-d` | unlimited | Max tree depth |
+| `--max-elements` | | unlimited | Max element count |
+| `--max-tokens` | | 4000 | Token budget for inline output. Overflow spills to subtree files. `0` = unlimited |
+| `--no-split` | | false | Disable subtree file splitting -- full inline output regardless of budget |
+| `--selector` | `-s` | | CSS selector to scope subtree |
+| `--mode` | | `ai` with `-i`, else `accessibility` | `ai`, `accessibility`, `structure` |
+| `--no-react` | | false | Skip React fiber enrichment |
+| `--no-portals` | | false | Skip portal stitching |
+
+Examples:
+```bash
+tauri-connector snapshot -i                        # Interactive elements with refs (default 4000-token budget)
+tauri-connector snapshot -i -c                     # Compact: only ref lines + subtree markers
+tauri-connector snapshot -i -s ".ant-form"         # Scope to subtree
+tauri-connector snapshot -i --mode accessibility   # ARIA roles/names
+tauri-connector snapshot -i --mode structure       # Tags/classes only
+tauri-connector snapshot -i -d 5 --max-elements 500
+tauri-connector snapshot -i --max-tokens 8000      # Raise inline budget
+tauri-connector snapshot -i --max-tokens 0         # Unlimited (legacy behavior)
+tauri-connector snapshot -i --no-split             # Full output, never write subtree files
+```
+
+When the budget fires, stderr prints the snapshot UUID plus each spilled subtree's label, estimated tokens, and absolute path under the app connector log directory's `snapshots/<uuid>/`. Splitting is recursive: an oversized wrapper keeps its own line inline and splits its children, so one app-root `div` no longer spills the whole page. The closing `N refs captured (I inline, S in subtree files)` line counts every ref, and all of them are cached, so a ref read from a subtree file works with `click`/`fill`. Only `-i` (ai mode) snapshots assign `@eN` refs; other modes end with `No @eN refs: <mode> snapshots do not assign refs ...` and clear the cached refs.
+
+Accessibility mode (the default without `-i`) adds `- text "…"` leaves for text that sits directly in an element whose name does not already include it (a generic `div` holding a total, a paragraph between links). `-i` (ai mode) leaves them out. Containers such as `body`, `main` or a `form` are no longer `[redacted]` just because a password field sits inside them; elements whose name comes from their content (buttons, links, headings, options…) still are.
+
+### snapshots
+
+Manage the snapshot session directory (subtree files from split snapshots).
+
+```bash
+tauri-connector snapshots list                     # Most recent 10 sessions (newest first)
+tauri-connector snapshots read <uuid>              # Print layout.txt (default)
+tauri-connector snapshots read <uuid> subtree-0.txt
+tauri-connector snapshots read <uuid> refs.json    # Full ref map when allRefs spills to disk
+tauri-connector snapshots read <uuid> meta.json    # Session metadata
+```
+
+`snapshots read` canonicalizes its path and refuses anything that escapes the session directory, so it is safe to drive from scripts.
+
+### dom
+
+Get the cached DOM pushed automatically from the frontend (no round-trip).
+
+```bash
+tauri-connector dom [--window-id <id>]
+```
+
+### find
+
+Find elements by CSS selector, XPath, or visible text.
+
+```bash
+tauri-connector find <selector> [-s <strategy>]
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--strategy` | `-s` | `css` | `css`, `xpath`, `text` |
+
+### get
+
+Read properties from elements or the page.
+
+```bash
+tauri-connector get <property> [target] [extra]
+```
+
+| Property | Target | Extra | Description |
+|---|---|---|---|
+| `title` | | | Page title |
+| `url` | | | Current URL |
+| `text` | `@eN` or CSS | | Element text content |
+| `html` | `@eN` or CSS | | Element innerHTML |
+| `value` | `@eN` or CSS | | Input element value |
+| `attr` | `@eN` or CSS | attr name | Attribute value |
+| `box` | `@eN` or CSS | | Bounding box `{x, y, width, height}` |
+| `styles` | `@eN` or CSS | | All computed CSS styles |
+| `count` | CSS selector | | Count of matching elements |
+
+`get title`, `get url`, `get count` and plain properties are sent as read-only (0.17.7+): a timeout or lost reply never quarantines the window. With no webview bridge connected and no answering eval channel the command fails with `bridge_not_connected` (`dispatched: false`, `retryableBeforeDispatch: true`) instead of `outcome_unknown`; open or reload the window and retry. Since 0.17.8 that refusal comes after about 3 s instead of at the deadline, and a window label that does not exist yet (app still starting) fails at once with `window_not_ready` (also `dispatched: false`, `retryableBeforeDispatch: true`); retry both.
+
+Examples:
+```bash
+tauri-connector get title
+tauri-connector get text @e7
+tauri-connector get attr @e5 href
+tauri-connector get count ".list-item"
+tauri-connector get styles ".error-banner"
+```
+
+### pointed
+
+Get the element captured by Alt+Shift+Click in the app.
+
+```bash
+tauri-connector pointed
+```
+
+---
+
+## Interactions
+
+### click
+
+```bash
+tauri-connector click <target>
+```
+
+`target` can be `@eN` ref or CSS selector.
+
+### dblclick
+
+```bash
+tauri-connector dblclick <target>
+```
+
+### hover
+
+```bash
+tauri-connector hover <target>
+```
+
+### focus
+
+```bash
+tauri-connector focus <target>
+```
+
+### fill
+
+Replace an input/textarea value through the native value setter, firing `input` and `change` so React/Vue controlled inputs update (same path as `webview_keyboard` `fill` and the locator `fill`). Monaco and other editors that cannot be cleared reliably return `not_actionable` -- use `type` there.
+
+```bash
+tauri-connector fill <target> <text>
+```
+
+### type
+
+Type text into the target through the plugin's editor-aware input helper: inputs and textareas get per-character key events plus native value updates, contenteditable hosts get `insertText`, and Monaco editors (the `.monaco-editor` container, its hidden `textarea.inputarea` / `.native-edit-context`, or a wrapper holding exactly one editor) are focused and fed line by line through `insertText` or the EditContext API. The result reports `editor`, `method` and `verified` (true when the Monaco model could be read back).
+
+```bash
+tauri-connector type <target> <text>
+```
+
+`<target>` is an `@eN` ref or a CSS selector that must match exactly one element. A ref the plugin no longer has cached is retried once with the CLI's locally cached selector.
+
+### check / uncheck
+
+Toggle checkbox state.
+
+```bash
+tauri-connector check <target>
+tauri-connector uncheck <target>
+```
+
+### select
+
+Select dropdown option(s) by value.
+
+```bash
+tauri-connector select <target> <values...>
+```
+
+### scroll
+
+Scroll the page or a specific element.
+
+```bash
+tauri-connector scroll [direction] [amount] [--selector <sel>]
+```
+
+| Arg | Default | Description |
+|---|---|---|
+| `direction` | `down` | `up`, `down`, `left`, `right` |
+| `amount` | `300` | Pixels to scroll |
+| `--selector` | | Element (or `@ref`) whose container to scroll |
+
+Since 0.17.8 `scroll` moves the container a user would scroll, not just the document: with `--selector`, that element or its nearest scrollable ancestor; without it, the scrollable container under the viewport centre, then the focused element's, then the hovered element's, then the document. A container that can still move in that direction wins over one at its edge. The result reports `container` (`tag`/`id`/`className`, `document` for the page), `source` (`selector`, `viewport-center`, `focus`, `hover` or `document`), `scrolledBy` (`{x, y}` actually moved; `{0, 0}` means everything was at its edge) and `position`.
+
+### scrollintoview
+
+Scroll element into viewport (smooth, centered).
+
+```bash
+tauri-connector scrollintoview <target>
+```
+
+### press
+
+Press a key (or combo) on the currently focused element.
+
+```bash
+tauri-connector press <key>
+tauri-connector press Meta+z
+tauri-connector press Control+Shift+ArrowLeft
+```
+
+Keys: `Enter`, `Tab`, `Escape`, `Backspace`, `Delete`, `Space`, arrows, `Home`, `End`, `PageUp`, `PageDown`, `Insert`, `F1`-`F24`, modifier names, or any single character; aliases such as `Esc`, `Return`, `Del`, `Up`, `Cmd`, `Ctrl`, `Option` are accepted. Combos join modifiers with `+`. Events carry `key`, `code` and legacy `keyCode`/`which` (Escape = 27), so keybinding libraries such as Monaco and rc-dialog/AntD recognise them on the first press. When the page does not `preventDefault()` the keydown on an editable target, the browser default is applied (`Backspace`/`Delete` delete, `Meta/Ctrl+z` undo, `Meta/Ctrl+Shift+z` / `Ctrl+y` redo, `Meta/Ctrl+a` select all); the result reports `keyboardCode`, `defaultPrevented` and `defaultAction`. An unknown key name (e.g. `NotAKey`) fails with `invalid_key` before any event is dispatched, so it never quarantines the lease.
+
+---
+
+## Drag and Drop
+
+```bash
+tauri-connector drag <source> <target> [FLAGS]
+```
+
+`source` and `target` can be `@eN` refs, CSS selectors, or `"x,y"` pixel coordinates.
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--steps` | `-s` | 10 | Intermediate move events (higher = smoother, some libs need >5) |
+| `--duration` | `-d` | 300 | Total drag time in ms |
+| `--strategy` | | `auto` | `auto`, `pointer`, `html5dnd` |
+
+Strategy details:
+- **auto**: Checks `el.draggable` -- uses `html5dnd` if true, `pointer` otherwise
+- **pointer**: `pointerdown` -> paced `pointermove` -> `pointerup` with mouse event mirrors. Down and every move carry `buttons: 1` (primary button held); up carries `buttons: 0`. Works with dnd-kit, SortableJS, framer-motion, custom sliders, resize handles.
+- **html5dnd**: `dragstart` -> paced `dragenter`/`dragover` -> `drop` + `dragend` with DataTransfer. Works with `draggable="true"`, react-beautiful-dnd.
+
+Examples:
+```bash
+tauri-connector drag @e3 @e7                              # Refs
+tauri-connector drag "#item-3" "#item-1"                  # CSS selectors
+tauri-connector drag @e5 "400,300"                        # To pixel coords
+tauri-connector drag @e3 @e7 --steps 20 --duration 500    # Slower, smoother
+tauri-connector drag "#card" ".list" --strategy pointer    # Force pointer
+tauri-connector drag "[draggable]" ".trash" --strategy html5dnd
+```
+
+---
+
+## Application-owned workflows
+
+```bash
+tauri-connector workflow capabilities
+tauri-connector workflow run <JSON_FILE_OR_INLINE_OR_STDIN_DASH> --wait-ms 30000
+tauri-connector workflow get <runId> --cursor 0 --include evidence
+tauri-connector workflow get <runId> --evidence-id <evidenceRef> --offset 0
+tauri-connector workflow cancel <runId>
+tauri-connector workflow resume <runId> --expected-revision 7 --checkpoint-id <checkpointId> --intent reconcile
+```
+
+| Subcommand | Flags | Notes |
+|---|---|---|
+| `capabilities` | | No token needed. Reports `ops`, `conditions`, `tools`, `authentication.configured`, `recovery`, `unsupported`, `limits` |
+| `run <SPEC>` | `--wait-ms <0-30000>` (default 1000) | `SPEC` is inline JSON, a file path, or `-` for stdin; forwarded unchanged, the app executes |
+| `get <runId>` | `--cursor <n>`, `--include steps,events,evidence`, `--evidence-id <ref>`, `--offset <bytes>` | `--offset` requires `--evidence-id`; omitted offset is 0 |
+| `cancel <runId>` | | Stops future dispatch only; nothing is rolled back |
+| `resume <runId>` | `--expected-revision <n>`, `--checkpoint-id <id>`, `--intent continue\|reconcile` (all three required) | Take the values from the latest report |
+
+Set `TAURI_CONNECTOR_WORKFLOW_TOKEN` to the trusted host token (at least 32 bytes). Capability lookup does not require a token. `run` reads a v1 spec and forwards it unchanged to the application; it never runs workflow steps in the CLI. The spec's `windowId` controls execution. `--wait-ms` ranges from 0 to 30000 (default 1000); it limits response waiting while app execution continues under its original deadline.
+
+The JSON response includes `runId` and the current status. Exit code `0` means completed success or successful capability lookup; `1` means failure, cancellation, invalid input or transport error; `2` means queued, running, paused, interrupted or unknown. A `completed` run exits `1` when `goalStatus` or `originalTestVerdict` is `failed`, and `2` when either is `inconclusive`. Never interpret a nonzero code as proof that no effect occurred. Query `get` or reuse the same `runKey` and identical spec after a lost submission response.
+
+`get --evidence-id` reads one retained reference as an `evidencePage` with JSON text `content`, byte `offset`, `nextOffset`, and `totalBytes`. Follow the returned UTF-8 byte `nextOffset` to read further chunks. `--offset` requires `--evidence-id`; omitted offset starts at zero. `nextOffset: null` marks the final chunk. Paging does not dispatch business actions.
+
+Resume requires all three flags and `--intent continue|reconcile`. Continue is allowed only for an undispatched paused step in the same app instance with remaining deadline. Reconcile only rechecks an available postcondition; it cannot replay an uncertain action or turn the original failure into a passing test. After app restart, retained runs are read-only history. See `references/mcp-tools.md` for spec/locator/expression/condition fields and limits.
+
+## Batch Actions
+
+```bash
+tauri-connector batch <SPEC> [FLAGS]
+```
+
+Run several MCP tool calls from one JSON spec -- sequentially, in parallel, or
+DAG-ordered via `dependsOn` -- and print the run report with one log entry per
+action (status, timing, result/error). `SPEC` is inline JSON, a path to a JSON
+file, or `-` for stdin. Actions use MCP tool names and arguments (see
+`references/mcp-tools.md` -> `batch_actions` for the full spec format); a bare
+JSON array is shorthand for `{ "actions": [...] }`.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--mode` | `sequential` | `sequential` or `parallel` (overrides the spec) |
+| `--continue-on-error` | off | Keep running the remaining actions after a failure (`stopOnError: false`); only explicit `dependsOn` edges on the failed action skip |
+| `--max-parallel` | unlimited | Cap on concurrently running actions |
+| `--save` | | Write the run report as pretty JSON to this file |
+
+Examples:
+```bash
+# Sequential flow: click, wait, then read errors
+tauri-connector batch '{
+  "actions": [
+    { "id": "open", "tool": "webview_interact", "args": { "action": "click", "selector": "@e5" } },
+    { "id": "settle", "tool": "webview_wait_for", "args": { "selector": ".modal", "timeout": 5000 } },
+    { "tool": "read_logs", "args": { "level": "error" } }
+  ]
+}'
+
+# Parallel evidence collection, report saved to a file
+tauri-connector batch flow.json --mode parallel --save report.json
+
+# Bare-array shorthand from stdin
+echo '[ { "tool": "bridge_status" }, { "tool": "ipc_get_backend_state" } ]' \
+  | tauri-connector batch -
+```
+
+- The global `--window-id` becomes the default `windowId` for actions that
+  don't set one in their own `args`.
+- Typed execution and verification failures fail the action. Arbitrary business JSON containing `error` remains data. Report-save failures preserve the business report with `persistenceWarning`.
+- Exits non-zero when any action fails or is skipped, after printing the
+  report.
+- `batch_actions`, `driver_session`, and `workflow_*` lifecycle tools are rejected inside a batch.
+- Batch screenshots default to saved artifacts with compact report references. Explicit `save: false` retains legacy inline base64.
+
+---
+
+## Screenshot
+
+```bash
+tauri-connector screenshot [output-path] [FLAGS]
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--format` | `-f` | `png` | `png`, `jpeg`, `webp` |
+| `--quality` | `-q` | 80 | JPEG/WebP quality (0-100) |
+| `--max-width` | `-m` | | Max width in pixels (maintains aspect ratio) |
+| `--selector` | `-s` | | CSS selector or `@eN` ref for element-scoped capture |
+| `--overwrite` | | false | Allow replacing an existing output path |
+| `--output-dir` | | connector artifact dir | Directory for auto-generated names (0.17.7: also honoured with `--source`/`--target`/`--bring-to-front`; created when missing) |
+| `--name-hint` | | `full` | Slug included in generated filenames |
+| `--bring-to-front` | | false | Unminimize, show and focus the window before a protected capture (otherwise a hidden window fails with `window_not_visible`) |
+| `--annotate` | | false | Overlay numbered labels for `@eN` refs from the latest `ai` snapshot |
+
+Examples:
+```bash
+tauri-connector screenshot --name-hint login-before -m 1280  # Auto artifact path
+tauri-connector screenshot /tmp/shot.png                     # If it exists, writes a unique sibling
+tauri-connector screenshot /tmp/shot.png --overwrite          # Explicitly replace that path
+tauri-connector screenshot --selector @e5 --name-hint submit  # Element capture
+tauri-connector snapshot -i && tauri-connector screenshot --annotate --name-hint map
+tauri-connector screenshot /tmp/s.webp -f webp
+tauri-connector screenshot /tmp/s.jpg -f jpeg -q 60
+```
+
+The command prints the final resolved path and `sha256` as JSON. Annotated screenshots also include `annotations`, `snapshotId`, and `refsPath`; artifact manifest rows include `path`, `sha256`, `refsPath`, `snapshotId`, `windowId`, `selector`, `width`, and `height`. Do not assume a reused requested path is the latest capture unless `--overwrite` was used. If the page reports `document.visibilityState` `hidden` (window minimised, occluded or on another space) or a full-window image is a single colour, the JSON output carries `warnings: [{code: "page_hidden", reasons, visibilityState, message}]` and stderr prints `warning: page_hidden: ...`; the image is still returned but may be blank or stale. Bring the app to the front and capture again. When every capture backend fails on a hidden page, the error ends with a `(page_hidden: ...)` hint. When a full-window capture of a visible page comes back as a single colour (for example white while a modal is open), the plugin retakes it from the WebView's own redacted snapshot: the output then reports `artifact.captureSource: "webview_native"` plus `artifact.fallback: {from, to, reason: "uniform_image", outcome}` and stderr prints `note: ... used webview_native instead`. `outcome` is `used`, `also_uniform` (original kept, with the `page_hidden` warning) or `failed` (original kept, with `error`). The window capture only considers this app's own windows.
+
+**Default capture (0.17.4+).** A plain full-window `screenshot` (no `--selector`, no `--annotate`) goes through the same protected pipeline as `--source auto` and MCP rich requests, so CLI, `--source auto` and MCP give the same image and size: the CSS viewport at the page's devicePixelRatio, with `captureSource`, `viewport`, `geometry`, `redaction`, `consistency` and `timings` added next to the legacy `path`/`sha256`/`width`/`height`/`artifact` fields. `auto` tries `webview_native` first because it is the WebView's own redacted snapshot of exactly the CSS viewport: no desktop compositing, no title bar, no other windows, no screen-recording permission, and the same geometry the snapshot refs use. It then tries `window_native`, then `dom_rendering`; `fallbacks` lists what was tried. Only when the protected pipeline itself is unavailable (no inspection token, an older plugin, no backend) does the CLI fall back to the legacy renderer, with a `legacy_renderer` warning. A hidden page or a page that changed mid-capture is reported, never retaken with the legacy renderer.
+
+**What `webview_native` does not show.** WebKit's snapshot API (`WKWebView takeSnapshot`) renders the page's layers itself and skips some compositor-only effects: `backdrop-filter` (frosted glass, blur behind sheets and toolbars) comes out unblurred or transparent, and the native title bar, vibrancy and window shadow are not included. When you need the pixels as the user sees them, use `--source window_native` (MCP `source: "window_native"`), which captures the composited window (it needs screen-recording permission on macOS).
+
+**Hidden windows.** A minimized, fully covered or other-Space window renders no frames, so a protected capture fails with `window_not_visible` naming the remedy instead of returning a blank or stale image. A known locked macOS screen returns `screen_locked` promptly (0.17.9), without suggesting focus. Run `tauri-connector windows focus` (MCP `manage_window(action: "focus")`), or pass `--bring-to-front` (MCP `bringToFront: true`; also on `eval` and `wait`) to let the connector unminimize, show and focus it first. A locked or sleeping screen must be unlocked; the first capture right after `--bring-to-front` can occasionally time out while the window comes up, so retry once.
+
+**Right after a reload.** After a reload or hot reload the capture waits (up to 5 s, within the request timeout) for the new page runtime, then for the viewport to stay unchanged across frames and match the window's logical inner size (up to about 400 ms), so it does not return the old frame or a transient size such as a 1920 px innerWidth. `consistency.viewportSettled: false` means the viewport never settled in that budget (for example a webview that does not fill its window); the capture is still consistent with the probed viewport. If the page reloads during a capture, the plugin and the CLI each retake it (up to 3 attempts, the CLI reconnecting if the reload dropped its connection); when the page keeps changing the error is `page_navigating` (or `capture_context_changed`) with `retryableBeforeDispatch: true`, never `outcome_unknown` / `Connection closed`. A screenshot sent while an `eval` or another tool holds the window waits for it (up to 15 s) instead of failing with `resource_busy`. A background window that does not answer fails fast with `window_not_visible` and is not quarantined.
+
+**0.17.7.** A capture whose document is navigating waits the navigation out (within the request timeout) and, if the page is still navigating at the deadline, fails with `page_navigating` (`retryableBeforeDispatch: true`) instead of `not_dispatched: Target document is navigating`. When another command keeps the window busy past the 15 s queue wait, the error is `resource_busy`, never `capture_timeout` followed by a legacy-renderer fallback. With `--source`/`--target`/`--bring-to-front` the CLI writes the image itself: `--output-dir DIR --name-hint X` saves into `DIR`. An explicit output path that already exists (without `--overwrite`) fails before capture with JSON `{"code":"output_exists","message":...,"stage":"export","path":...}` and a non-zero exit; other write failures use the same shape (`export_failed` / `export_refused`).
+
+**One output shape (0.17.5+).** The default capture and `--source <s>` print the same top-level fields: `path` and `exportedPath` (the written file; both `null` for `--source` without an output path), `sha256`, `width`, `height`, `sizeKb`, `warnings`, and every field of the plugin's capture report: `artifactId` (the protected artifact id), `captureSource`, `sourceSelection`, `storage`, `retainedUntil`, `capturedAt`, `image`, `viewport`, `geometry`, `redaction`, `consistency`, `fallbacks`, `context` and `timings`. The default capture keeps its `artifact` object (CLI manifest row, `artifactId: "shot_..."`). Since 0.17.6 every source also prints `artifact` (`null` for `--source` without an output path), `requestedPath`, `resolvedFromCollision`, `overwrote`, and a top-level `viewportCrop` `{cropped, basis, rectPx, windowPx}`: `basis` is `css_viewport` when the image is exactly the CSS viewport (`webview_native`, `dom_rendering`, a matching `window_native` crop), `client_area` when the window capture was cropped to its client area, `uncropped` for a whole-window image, and `not_reported` only for plugins before 0.17.6. `sourceSelection` is `{requested, order, selected, reason}` and says why the image came from that source: `auto` picked `webview_native` for the reasons above, fell back because earlier sources failed (see `fallbacks`), or the source was requested explicitly (no fallback). Plugins before 0.17.5 do not send `sourceSelection`. **Since 0.17.8 the `artifact` object is identical with and without `--bring-to-front`/`--source`/`--target`:** the same 25 keys, `artifactId`/`id` always `shot_<file stem>` (the CLI manifest id, usable with `artifacts show/compare`; such files are now recorded in the manifest too), and `protectedArtifactId` holding the plugin's `<instance>:artifact:<uuid>` id, which stays the top-level `artifactId`. Before 0.17.8 those flags printed an 11-key `artifact` whose `artifactId` was the protected id. Selector and `--annotate` captures still use the legacy renderer and keep their own fields (`rectCssPx`, `fallback`, `viewportCrop`).
+
+`--source window_native` crops the macOS title bar band when the window reports no separate client area. The legacy whole-window fallback (xcap) reports `viewportCrop` (`cropped`, `basis`: `css_viewport`, `client_area` or `uncropped`, `rectPx`, `windowPx`). It crops to the page viewport when the page can report it; while the page is still loading it cannot, so the image may be the whole window with the title bar, and a `viewport_crop_unverified` warning says whether anything was cropped. Retake after the page loads. `--source dom_rendering` needs the app to expose snapdom as a global (`import { snapdom } from '@zumer/snapdom'; window.snapdom = snapdom;`); without it the error is `capture_backend_unavailable` naming that remedy.
+
+### artifacts
+
+List, inspect, prune, and compare screenshot artifacts from the connector manifest.
+
+```bash
+tauri-connector artifacts list --kind screenshot          # --limit/-l caps entries (default 100)
+tauri-connector artifacts list -l 20
+tauri-connector artifacts show shot_...
+tauri-connector artifacts show shot_... --base64
+tauri-connector artifacts compare shot_before shot_after --threshold 0.01
+tauri-connector artifacts prune --keep 50
+tauri-connector artifacts prune --keep 50 --manifest-only
+```
+
+`prune` removes older manifest entries and deletes their files by default. Use `--manifest-only` to rewrite only the registry.
+
+---
+
+## Logs & Debugging
+
+### logs
+
+Read console logs from the webview.
+
+```bash
+tauri-connector logs [FLAGS]
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--lines` | `-n` | 20 | Number of entries |
+| `--filter` | `-f` | | Substring match |
+| `--level` | `-l` | | Comma-separated: `log`, `info`, `warn`, `error`, `debug` |
+| `--pattern` | `-p` | | Regex match |
+
+Each line is `HH:MM:SS.mmm ±HH:MM LEVEL message` in the machine's local time with its UTC offset. Messages are formatted like devtools: `%s %d %i %f %o %O` are substituted, `%c` and its CSS argument are dropped, and `Error` arguments print as `Name: message` plus the stack. `Map`/`Set` print their entries (`Map(2) {"a" => 1,...}`), DOM nodes print as a short summary such as `<body#app.dark>`, React elements as `<Card />`, and framework internals (`__react*`, `_reactInternals`) are skipped; objects are cut off at depth 6 and 50 entries per level, and a message is capped at 16 KB. `logs` pulls entries the page has not pushed yet before reading, so a line logged a moment ago shows up immediately (also for `-p`/`-f`/`-l`). IPC calls appear in `ipc` logs only after `ipc monitor` (or capture) has been started.
+
+Log files (`console.log`, `ipc.log`, `events.log`, `runtime.log` in the connector log directory) start empty on every app launch; the previous run's non-empty files are kept as `<name>.prev.log` (one generation), so `logs` never mixes lines from an earlier session.
+
+### runtime
+
+Read runtime-level frontend captures: window errors, unhandled promise rejections, network failures/statuses, navigation changes, and resource load failures.
+
+```bash
+tauri-connector runtime -n 100 --kind network --pattern "500|timeout"
+tauri-connector runtime -l error --since-mark mark_...
+tauri-connector clear runtime
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--lines` | `-n` | 100 | Number of entries |
+| `--kind` | `-k` | | Comma-separated kinds: `network`, `window_error`, `unhandledrejection`, `navigation`, `resource_error` |
+| `--level` | `-l` | | Comma-separated levels: `error`, `warn`, `info` |
+| `--pattern` | `-p` | | Regex match on the serialized entry |
+| `--since` | | | Epoch ms filter |
+| `--since-mark` | | | Debug mark id from `debug mark` |
+
+### debug
+
+Create marks and collect bundled debug context.
+
+```bash
+tauri-connector debug mark before-login-click
+tauri-connector debug snapshot --dom --screenshot --logs --ipc --events --runtime
+tauri-connector debug snapshot --runtime --since-mark mark_...
+```
+
+`debug snapshot` flags:
+
+| Flag | Description |
+|---|---|
+| `--dom`, `--screenshot`, `--logs`, `--ipc`, `--events`, `--runtime` | Sections to include (each off unless passed) |
+| `--since <epoch-ms>`, `--since-mark <id>` | Only captures after a timestamp or a `debug mark` |
+| `--max-tokens <n>` | Inline token budget for the DOM snapshot |
+| `--screenshot-name-hint <slug>` | Name hint for the saved screenshot artifact |
+
+### act
+
+Perform an action, wait for a visible result, and collect fresh evidence in one call.
+
+```bash
+tauri-connector act <action> [target] [text...] [FLAGS]
+tauri-connector act click @e5 --wait-text Success --screenshot --logs --ipc --runtime
+tauri-connector act fill @e3 "user@example.com" --wait-selector ".valid" --dom
+tauri-connector act press Enter --wait-selector ".submitted" --runtime
+tauri-connector act drag @e3 --target-selector @e7 --wait-selector ".dropped"
+```
+
+| Arg / flag | Default | Description |
+|---|---|---|
+| `action` | | `click`, `fill`, `type`, `press`, `drag`, `hover` |
+| `target` | | Selector or `@eN`; for `press`, the key name when `--key` is omitted |
+| `text` | | Text for `fill` / `type` |
+| `--key` | | Explicit key for `press` |
+| `--target-selector` | | Drag destination selector or `@eN` |
+| `--wait-selector`, `--wait-text` | | Condition expected after the action |
+| `--timeout` | 5000 | Wait timeout in ms |
+| `--dom`, `--screenshot`, `--logs`, `--ipc`, `--runtime` | off | Evidence to collect after the wait |
+
+The response carries `verdict`: `failed` when the action or the wait failed, `inconclusive` when no `--wait-selector`/`--wait-text` was given, `passed` otherwise. Inside `batch`, a `failed` verdict fails the action (`postcondition_failed`).
+
+### eval
+
+Execute arbitrary JavaScript and print the result.
+
+```bash
+tauri-connector eval <script>
+tauri-connector eval --timeout 120000 "await longTask()"
+```
+
+The script may be an expression, a statement list whose last expression is printed (`eval "const n = document.querySelectorAll('li').length; n * 2"`), or an async function body with `return`/`await`; expressions are tried first, so existing scripts keep their meaning. An async body without `return` (0.17.7+) returns its last top-level expression like devtools: `eval 'await load(); document.title'` prints the title (0.17.6 printed `null`). Under a page CSP that blocks `unsafe-eval` that rewrite is unavailable, so add an explicit `return` there.
+
+`--bring-to-front` (0.17.4+) runs `windows focus` on the target window first, for apps that sit in the background. A minimized, hidden or covered window that fails with `window_not_visible` names this flag (and `windows focus`) in the message.
+
+`--timeout <ms>` sets the page-side deadline (default 30000, max 600000); the CLI waits 5 s longer so the plugin's typed timeout, with its requestId, always arrives. An empty script is rejected before anything is sent. A read-only promise (no IPC or write observed) still pending at the deadline fails with `execution_timeout` and releases the window. A script that may have dispatched IPC or a write, or a page that never answers, leaves the outcome unknown and quarantines the window until its late result settles it or `resources release` -- see `resources`.
+
+### resources
+
+List or release resource quarantines. An operation whose outcome is unknown (an eval or interaction that timed out or lost its connection, or a throw with `effect: possible`) quarantines its scopes; later commands fail with `resource_busy`, whose message names the quarantining requestId and reason.
+
+```bash
+tauri-connector resources                       # quarantined requestIds, reasons, scopes, recent late results
+tauri-connector resources release <requestId>   # lift one after checking the app
+tauri-connector resources release --all
+```
+
+A quarantine lifts in three ways: the page later reports the timed-out request finished (success, or a throw with `effect: none`), an explicit `tauri-connector resources release <requestId>` / `--all` (MCP `resources` action=release) after you have checked the app, or an app restart. A timed-out request keeps listening for its page result for 10 minutes; a late success or effect-free failure lifts its quarantine automatically and appears under "late result". A late failure with possible effects keeps it. Since 0.17.8 a quarantine also expires on its own 60 s after it was set (checked on the next acquire or `resources` listing, which is the only thing a listing changes), so a stale one cannot block the app for the rest of the session; the expiry is recorded as an `expired` late result. `resources` prints the time left as `expires in Ns`. Each request appears once in the late-result history (a repeat settlement refreshes its line and never downgrades a settled outcome to `lost`); identical lines from older plugins print once with an `(xN)` count.
+
+### state
+
+Print app metadata: name, version, debug/release, OS, arch, window list.
+
+```bash
+tauri-connector state
+```
+
+### wait
+
+Wait for selector state, text content, URL glob, load state, or a JavaScript condition (polls every 100ms). Multiple conditions are combined.
+
+```bash
+tauri-connector wait [selector] [FLAGS]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--text` | | Text to wait for (NBSP/whitespace-normalised; also matches DOM text hidden from `innerText`, field values and same-origin iframes) |
+| `--url` | | Glob pattern matched against `location.href` |
+| `--load-state` | | `domcontentloaded` or `load`; `networkidle` returns `unsupported_condition` |
+| `--fn` | | JavaScript expression/function/body that returns truthy |
+| `--state` | `attached` (applied by the plugin when omitted) | Selector state: `attached`, `detached`, `visible`, `hidden` |
+| `--timeout` | 5000 | Timeout in ms |
+| `--bring-to-front` | false | Unminimize, show and focus the window first (0.17.4+) |
+
+Examples:
+```bash
+tauri-connector wait ".loaded" --state visible --timeout 10000
+tauri-connector wait --url "**/settings*" --load-state load
+tauri-connector wait --fn "window.__APP_READY__ === true"
+tauri-connector wait ".toast" --state hidden
+```
+
+A standalone `wait` prints `{ "found": false, "timeout": true, ... }` and exits 0 on timeout (only transport errors exit 1), so check `found` in scripts. Inside `batch` the same timeout is a failure (`condition_timeout`): the action fails, its dependents skip, and the batch exits non-zero.
+
+### locator
+
+Find by semantic locator and optionally act on the matched element. Use this when `@eN` refs are unavailable or stale.
+
+```bash
+tauri-connector locator --role button --name "Save" --action click
+tauri-connector locator --label Email --action fill --value user@example.com
+tauri-connector locator --text "Sign in" --exact --first
+tauri-connector locator --test-id submit --action click
+```
+
+| Flag | Description |
+|---|---|
+| `--role`, `--text`, `--label`, `--placeholder`, `--alt`, `--title`, `--test-id` (alias `--testid`) | Primary locator |
+| `--name` | Accessible name. Alone it matches exposed elements by name; with other filters it narrows them. A miss lists the names the other filters found (`candidates`) |
+| `--exact` | Exact text/name match |
+| `--first`, `--last`, `--nth` | Match selection |
+| `--action` | `click`, `fill`, `type`, `hover`, `focus`, `check`, `uncheck`, `text` |
+| `--value` | Value for `fill` or `type` |
+
+### clear
+
+Clear log files.
+
+```bash
+tauri-connector clear <target>
+```
+
+`target`: `logs`, `ipc`, `events`, `runtime`, `all`
+
+---
+
+## IPC Commands
+
+### ipc exec
+
+Execute a Tauri IPC command.
+
+```bash
+tauri-connector ipc exec <command> [-a <json-args>]
+```
+
+### ipc monitor / unmonitor
+
+Start or stop IPC call monitoring in the window selected by the global `--window-id` (default `main`). The response reports `desired`/`applied` for that window and the command fails with `observation_failed` if its page never acknowledges; monitor each window you care about separately.
+
+```bash
+tauri-connector ipc monitor
+tauri-connector ipc unmonitor
+```
+
+### ipc captured
+
+View captured IPC calls.
+
+```bash
+tauri-connector ipc captured [FLAGS]
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--filter` | `-f` | | Substring match on command |
+| `--pattern` | `-p` | | Regex match |
+| `--since` | | | Epoch ms filter |
+| `--limit` | `-l` | 100 | Max entries |
+
+---
+
+## Event Commands
+
+### emit
+
+Emit a Tauri event.
+
+```bash
+tauri-connector emit <event-name> [-p <json-payload>]
+```
+
+### events listen
+
+Start listening for specific Tauri events.
+
+```bash
+tauri-connector events listen <events>
+```
+
+`events`: comma-separated event names (e.g., `user:login,app:error`)
+
+### events captured
+
+View captured events.
+
+```bash
+tauri-connector events captured [FLAGS]
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--pattern` | `-p` | | Regex match |
+| `--since` | | | Epoch ms filter |
+| `--limit` | `-l` | 100 | Max entries |
+
+### events stop
+
+Stop listening for events.
+
+```bash
+tauri-connector events stop
+```
+
+---
+
+## Window Management
+
+### windows
+
+List all open windows, or bring one to the front.
+
+```bash
+tauri-connector windows                      # list (same as `windows list`)
+tauri-connector windows focus [--window-id <id>]   # 0.17.4+: unminimize, show and focus natively
+```
+
+`windows focus` works through the native window, not the webview, so it succeeds even when the page is hidden and every webview call times out (`window_not_visible`, `capture_not_ready: render_frame_timeout`). It prints `{windowId, focused, visible, minimized, focusError}`. On macOS (0.17.8+) it also activates the app and orders the window front, retrying once if the window is not focused after 400 ms, so the window comes in front of whichever app was frontmost; `focused: false` after that means macOS refused activation (for example another app holds a modal session). A locked or sleeping screen still renders nothing until it is unlocked. It needs tauri-plugin-connector 0.17.4+ in the app; older plugins answer with an unknown-variant error and a hint.
+
+### resize
+
+Resize a window.
+
+```bash
+tauri-connector resize <width> <height> [--window-id <id>]
+```
+
+---
+
+## Utility
+
+### update
+
+Check for or install CLI updates from GitHub Releases.
+
+```bash
+tauri-connector update [--check]
+```
+
+### examples
+
+Print usage examples.
+
+```bash
+tauri-connector examples
+```
+
+### doctor
+
+Diagnose the current project's tauri-connector setup. Walks `src-tauri/`, the
+frontend `package.json`, `.mcp.json`, and the runtime `.connector.json` PID
+file, then probes the WebSocket + MCP ports. Each missing piece is reported
+with a concrete Fix line, and `--json` includes a top-level `fixes` array for
+CI/reporting. Exits non-zero when one or more required checks fail.
+
+```bash
+tauri-connector doctor                     # full checklist
+tauri-connector doctor --no-runtime        # skip live WS/MCP probes
+tauri-connector doctor --json              # machine-readable output
+```
+
+What it verifies:
+- `tauri-plugin-connector` in `src-tauri/Cargo.toml`
+- plugin registered via `tauri_plugin_connector::init()` (or `ConnectorBuilder`) in `lib.rs`/`main.rs`
+- `"connector:default"` permission in any file under `src-tauri/capabilities/`
+- `app.withGlobalTauri: true` in `src-tauri/tauri.conf.json`
+- `@zumer/snapdom` in root `package.json` (any dependency bucket)
+- `.mcp.json` registers `tauri-connector`; a legacy SSE entry (`"type": "sse"` or an `/sse` URL) warns with the exact `{ "type": "http", "url": "http://127.0.0.1:<port>/mcp" }` replacement
+- the `.mcp.json` port belongs to this project's app (0.17.5+): fails when the MCP server there reports a different app id than `tauri.conf.json` `identifier`, or when the project's live PID file says this app serves MCP on another port; the Fix gives this app's URL or how to find and pin it with `ConnectorBuilder::mcp_port_range(...)`. The owner comes from the plugin's MCP initialize `_meta["dev.tauri-connector/app"]` (`appId`, `appName`, `pid`, `pluginVersion`; omitted when the host sets a workflow token)
+- `.connector.json` PID file + live WS ping + MCP Streamable HTTP initialize POST
+- fix lines use the ports the app actually bound (0.17.7+): `.mcp.json` snippets name the MCP port from `.connector.json` (else `TAURI_CONNECTOR_MCP_PORT`, else 9556), and the "no webview bridge clients" fix names the bridge port from `.connector.json` or this shell's effective `TAURI_CONNECTOR_BRIDGE_PORT` / `_BRIDGE_PORT_RANGE` (default 9300-9400)
+- the global `--pid-file PATH` (0.17.7+) points doctor at a `.connector.json` outside the usual `src-tauri/target` locations
+- PID liveness, runtime metadata/log_dir, JSONL log files, bridge status, runtime/artifact/debug WS commands
+- MCP Streamable HTTP lifecycle: initialize 200, notification 202 empty body, ping 200, GET /mcp 405, DELETE 204
+- `.claude/` auto-detect hook installation (optional; `Fix:` points at `tauri-connector hook install`)
+- installed local skill docs (`~/.claude/skills`, `~/.agents/skills`, `~/.codex/skills`) match the CLI-bundled copies (warn only)
+
+### hook
+
+Install or remove the Claude Code auto-detect hook: a `UserPromptSubmit` hook wired into `.claude/settings.local.json` that announces the connector tools on each prompt while the app's `.connector.json` PID file is live, and stays silent otherwise.
+
+```bash
+tauri-connector hook install
+tauri-connector hook remove
+```

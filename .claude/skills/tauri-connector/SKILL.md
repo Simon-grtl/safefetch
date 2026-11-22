@@ -1,0 +1,610 @@
+---
+name: tauri-connector
+version: 0.17.10
+description: "Deep inspection, interaction, debugging, and code review for Tauri v2 desktop apps. Use this skill whenever: working with a Tauri app's UI (clicking, filling forms, reading DOM, screenshots, dragging elements); debugging console logs, IPC calls, or Tauri events; reviewing component trees, accessibility, or visual regressions; testing user flows or validating IPC contracts; setting up tauri-connector in a new project. Also triggers on: DOM snapshots, element refs, webview interaction, drag-and-drop, IPC debugging, Tauri app testing, visual regression, admin/ front/ or tool/ desktop apps, @eN ref syntax, or any mention of tauri-connector CLI or MCP tools. This is Claude's bridge to any running Tauri v2 desktop app -- if a Tauri app is involved, use this skill."
+allowed-tools:
+  - Bash
+  - Read
+  - Glob
+  - Grep
+---
+
+# Tauri Connector -- Debug & Code Review Suite
+
+Inspect, interact with, debug, and review Tauri v2 desktop apps. The MCP server is embedded in the Tauri plugin -- it starts automatically when the app launches. No separate server process needed. (A standalone `tauri-connector-mcp` stdio binary also exists for clients that can't reach the embedded HTTP server; most sessions never need it.)
+
+## Architecture
+
+The plugin injects a JavaScript bridge into each Tauri webview. Commands flow through three paths:
+
+| Path | When to use |
+|---|---|
+| **MCP tools** (preferred) | Claude has MCP access via `.mcp.json` -- tools appear as `webview_*`, `ipc_*`, etc. |
+| **CLI** (`tauri-connector`) | Shell commands with `@eN` ref addressing from snapshots |
+| **Bun scripts** (fallback) | Neither MCP nor CLI binary available -- scripts at `scripts/` relative to this skill |
+
+Pick the first path available, in that order: MCP tools need no shell round-trip; the CLI needs the binary (`which tauri-connector`); Bun scripts need only `bun` plus this skill's `scripts/` dir. All three drive the same WebSocket protocol, so refs and capabilities behave identically.
+
+Verify the intended application using its live PID record and actual ports; port 9555 is only a default. Match the PID, executable, app identifier and window before acting.
+
+Port layout:
+
+| Range | Purpose |
+|---|---|
+| 9300--9400 | Internal bridge (plugin <-> webview JS) |
+| 9555--9655 | External WebSocket (CLI + bun scripts) |
+| 9556--9656 | Embedded MCP HTTP server: `/mcp` Streamable HTTP, `/sse` legacy HTTP+SSE |
+
+Since 0.17.8 each app first retries the WS/MCP ports it bound last time (`<app data>/<identifier>/.tauri-connector/ports.json`), so several apps on the default ranges keep their ports across restarts in any order; exact ports (`TAURI_CONNECTOR_PORT` / `TAURI_CONNECTOR_MCP_PORT`, `ConnectorBuilder::port` / `mcp_port`) still win. `TAURI_CONNECTOR_REMEMBER_PORTS=0` disables it.
+
+## Known multi-step intent: workflow first
+
+For a known short sequence, query `workflow_capabilities`, then submit a strict sequential v1 spec with `workflow_run`. The application performs target resolution, input, condition checks and prior-step bindings. Use `workflow_get` to inspect the returned `runId` after a timeout or disconnect. Read an individual retained evidence reference with `evidenceId` and follow `evidencePage.nextOffset` as the next byte `offset` when the report is truncated. Reuse the same `runKey` and spec when the submission response is lost; never restart an uncertain write with a new key.
+
+Workflows need a host workflow token of at least 32 bytes (shorter values are ignored with a stderr warning). Without a host token the plugin runs in debug mode: discovery (`app_identity`), `status`, `runtime-health`, rich screenshots (`--source`), the element picker and IPC capture work unauthenticated; only `workflow_*` run/get/cancel/resume need the token. Once the host configures a token, those inspection APIs require it too, and `status` shows such an instance as `unauthorized` rather than `stale`. CLI/standalone MCP read `TAURI_CONNECTOR_WORKFLOW_TOKEN`; embedded MCP takes `authToken` outside the spec. Do not place tokens or other credentials in workflow inputs. Run fixture examples only against isolated test data.
+
+```bash
+tauri-connector workflow capabilities
+tauri-connector workflow run fixture.json --wait-ms 30000
+tauri-connector workflow get <runId> --include evidence
+tauri-connector workflow resume <runId> --expected-revision 7 --checkpoint-id <checkpointId> --intent reconcile
+```
+
+For a complete local form spec with an explicit final goal, use the [isolated-form example](references/upgrade-and-smoke.md#example-workflow). Prepare its dedicated test controls first; use real business controls only when that action is the user's intended test.
+
+Each locator must resolve to exactly one actionable element (`target_not_found` / `ambiguous_target` / `not_actionable` otherwise) -- narrow it with `name`, a nested `scope` locator, or `entity: {attribute, value}`. `runKey` identifies a logical workflow submission: resubmitting the identical spec returns the existing run, while a changed spec under the same key returns `run_key_conflict`. Check `authentication.configured` in `workflow_capabilities` when a call returns `unauthorized`.
+
+The Bun fallback uses the same app-owned service: `bun run $SCRIPTS/workflow.ts run @arguments.json`, where the file contains `{"spec": {...}}`. Use `get`, `cancel`, `resume` or `capabilities` with their JSON arguments. It reads `TAURI_CONNECTOR_WORKFLOW_TOKEN`, checks application support, and preserves incomplete/failure exit codes.
+
+`continue` is limited to an undispatched paused step within the same application instance and original deadline. `reconcile` only rechecks an available postcondition; it does not replay actions or erase the original failure. Cancellation prevents future dispatch and does not roll back prior effects. CLI codes are `0` completed, `1` failed/cancelled, `2` pending/paused/unknown; a `completed` run still exits `1` when `goalStatus`/`originalTestVerdict` is `failed` and `2` when `inconclusive`. Over MCP only the exit-1 case sets `isError`, so read `status` and `allowedNextActions` from the body. `goalStatus: not_requested` does not mean the business goal was verified. `query` steps refuse password/secret-looking fields (`capability_unavailable`). See `references/mcp-tools.md` and `references/cli-commands.md` for exact arguments and examples.
+
+Workflow v1 supports role/label/testId/CSS locators; it rejects legacy `@ref` fallback, arbitrary JS, unknown IPC, parallel scheduling and transition-event assertions. DOM conditions establish observed UI state, not business persistence. For an unknown UI issue, continue with the inspection loop below.
+
+## Core Loop: Debug Snapshot -> Act And Verify
+
+Start with the high-level tools when debugging an unknown UI issue:
+
+```bash
+# MCP
+debug_snapshot(includeDom: true, includeLogs: true, includeRuntime: true, includeScreenshot: true)
+webview_act_and_verify(action: "click", selector: "@e5", waitForText: "Success", includeLogs: true, includeIpc: true, includeRuntime: true)
+
+# CLI
+tauri-connector debug snapshot --dom --logs --runtime --screenshot
+tauri-connector act click @e5 --wait-text Success --logs --ipc --runtime
+```
+
+Fallback to the manual Snapshot -> Act -> Verify loop when you need finer control:
+
+1. **Snapshot** the DOM to see what's on screen and get ref IDs
+2. **Act** on elements using those refs (click, fill, drag, type, etc.)
+3. **Verify** the result (re-snapshot, check logs, wait for element, screenshot)
+
+Refs like `@e5`, `@e12` are stable handles assigned to interactive elements during a snapshot. The engine uses a multi-strategy fallback (CSS selector -> ARIA role+name -> tag+text content) to re-resolve them even after DOM changes. **Always re-snapshot after DOM-changing actions** -- old refs may point to stale or removed elements.
+
+```bash
+# MCP
+webview_dom_snapshot(mode: "ai")                          # 1. Snapshot
+webview_interact(action: "click", selector: "@e5")        # 2. Act
+webview_wait_for(text: "Success", timeout: 5000)          # 3. Verify
+
+# CLI
+tauri-connector snapshot -i                               # 1. Snapshot (interactive refs)
+tauri-connector click @e5                                 # 2. Act
+tauri-connector wait --text "Success"                     # 3. Verify
+```
+
+---
+
+## Debugging
+
+### Console Errors
+
+```bash
+# Recent errors
+read_logs(level: "error", lines: 100)
+tauri-connector logs -l error -n 100
+
+# Multi-level with regex
+read_logs(level: "error,warn", pattern: "timeout|failed")
+tauri-connector logs -l error,warn -p "timeout|failed"
+
+# Historical logs (survive app restarts, stored as JSONL)
+read_log_file(source: "console", level: "error", lines: 200, since: 1711900000000)
+```
+
+### IPC Debugging
+
+Monitor all `invoke()` calls to find failing commands, unexpected args, or slow responses:
+
+```bash
+# 1. Start monitoring
+ipc_monitor(action: "start")
+tauri-connector ipc monitor
+
+# 2. Trigger the action in the app
+
+# 3. Check captured calls (each entry has: command, args, duration_ms, error)
+ipc_get_captured(pattern: "user_\\d+", limit: 20)
+tauri-connector ipc captured -p "user_\d+" -l 20
+
+# 4. Test a specific command directly
+ipc_execute_command(command: "greet", args: {"name": "test"})
+tauri-connector ipc exec greet -a '{"name":"test"}'
+
+# 5. Stop monitoring
+ipc_monitor(action: "stop")
+tauri-connector ipc unmonitor
+```
+
+### Protected inspection and active element selection
+
+For bounded IPC return previews, use authenticated `ipc_capture` sessions and `ipc_query`; keep the returned session ID and follow readiness, gaps and pending status. Legacy IPC logs do not expose these protected results. An invoke observation does not establish backend persistence or a causal relationship to a workflow step.
+
+For an ambiguous target, start `webview_select_element` (CLI `picker start` or `select-element`). The user hovers and confirms an actual element; use `get` / `cancel` with the returned handle across connections. Request-key retries preserve one picker and its deadline. Selection, screenshot and cleanup have independent status. Polling never repeats capture. The picker cannot edit an existing workflow spec or original verdict, and cannot release unknown-write quarantine. Review [the picker contract](references/mcp-tools.md#webview_select_element) before using candidates or requesting an image.
+
+New inspection tools require `inspectionProtocolVersion:1` and the host's existing workflow token in the envelope, outside the spec. Verify application instance and page context; a health response or new screenshot never permits replaying a possibly dispatched write.
+
+### Event Debugging
+
+Monitor Tauri app-level events (not DOM events):
+
+```bash
+# Listen for specific events
+ipc_listen(action: "start", events: ["user:login", "app:error", "state:update"])
+tauri-connector events listen user:login,app:error,state:update
+
+# Trigger actions, then check captured events
+event_get_captured(pattern: "error", limit: 50)
+tauri-connector events captured -p "error" -l 50
+
+# Stop listening
+ipc_listen(action: "stop")
+tauri-connector events stop
+```
+
+### Visual Debugging
+
+```bash
+# Legacy window screenshot (xcap, with explicit DOM fallback provenance)
+webview_screenshot(format: "png", maxWidth: 1280, save: true, nameHint: "debug")
+tauri-connector screenshot --name-hint debug -m 1280
+
+# Annotated vision map: labels [N] map to @eN refs from the latest ai snapshot
+webview_dom_snapshot(mode: "ai")
+webview_screenshot(format: "png", annotate: true, save: true, nameHint: "map")
+tauri-connector snapshot -i && tauri-connector screenshot --annotate --name-hint map
+
+# DOM snapshot shows full element tree with refs
+webview_dom_snapshot(mode: "ai")
+tauri-connector snapshot -i
+
+# Search the snapshot for patterns
+webview_search_snapshot(pattern: "error|warning", context: 3)
+```
+
+### Runtime State Inspection
+
+```bash
+# App metadata: name, version, debug/release, OS, arch, window list
+ipc_get_backend_state()
+tauri-connector state
+
+# Execute arbitrary JS for runtime inspection
+webview_execute_js(script: "(() => { return window.__APP_STATE__ })()")
+tauri-connector eval "JSON.stringify(window.__APP_STATE__)"
+
+# Check element computed styles
+webview_get_styles(selector: ".error-banner", properties: ["display", "color", "visibility"])
+tauri-connector get styles ".error-banner"
+
+# Get specific element properties
+tauri-connector get text @e7        # Text content
+tauri-connector get value @e3       # Input value
+tauri-connector get attr @e5 href   # Attribute
+tauri-connector get box @e5         # Bounding box
+tauri-connector get count ".item"   # Count matching elements
+```
+
+### Full Debug Recipe
+
+When investigating a bug, use `debug_snapshot` first to collect app/bridge state, DOM, logs, runtime captures, and optional screenshot in one call. For a failing interaction, use `webview_act_and_verify` to mark, act, wait, and collect log/IPC/runtime diffs. If the verdict is inconclusive, fall back to the manual loop:
+
+1. `debug_snapshot(includeDom: true, includeLogs: true, includeRuntime: true)`
+2. `webview_act_and_verify(action: "...", selector: "@eN", waitForText: "...", includeLogs: true, includeIpc: true, includeRuntime: true)`
+3. Manual fallback: `webview_dom_snapshot` -> `ipc_monitor(start)` -> action -> `read_logs` / `runtime_get_captured` / `ipc_get_captured` -> `webview_screenshot` -> `ipc_monitor(stop)`
+
+For more recipes: read [references/debug-playbook.md](references/debug-playbook.md).
+
+---
+
+## Code Review
+
+### Visual Regression Check
+
+Capture before/after screenshots as artifacts, then diff them:
+
+```bash
+# MCP
+webview_screenshot(format: "png", save: true, nameHint: "before-fix")
+# ...apply the code change, rebuild/hot-reload...
+webview_screenshot(format: "png", save: true, nameHint: "after-fix")
+artifact_compare(before: "<beforeArtifactId>", after: "<afterArtifactId>")
+
+# CLI
+tauri-connector screenshot --name-hint before-fix
+tauri-connector screenshot --name-hint after-fix
+tauri-connector artifacts compare <beforeId> <afterId>
+```
+
+`artifact_compare` is a fast byte-level diff (`metric: "byte-diff"`), not a perceptual one: `percentDifferent` is the 0--1 fraction of differing bytes and `passed` means `percentDifferent <= threshold` (default 0). Byte-identical proves nothing changed; any nonzero diff only means *something* changed -- read both screenshots and judge visually before declaring a regression.
+
+### Accessibility Audit
+
+Use accessibility mode to review ARIA roles, names, and semantic structure:
+
+```bash
+webview_dom_snapshot(mode: "accessibility")
+tauri-connector snapshot -i --mode accessibility
+```
+
+Check for: missing labels on interactive elements, incorrect ARIA roles, broken focus order, form fields without associated labels, missing alt text.
+
+### Component Tree Review
+
+React apps get component names extracted from fiber internals:
+
+```bash
+webview_dom_snapshot(mode: "ai", reactEnrich: true, followPortals: true)
+tauri-connector snapshot -i
+```
+
+The snapshot shows React component names, stitches portals to their triggers, and annotates virtual scroll containers:
+
+```
+- combobox "Status" [ref=e5, component=InternalSelect, expanded=true]:
+  - listbox "Status options" [portal]:
+    - option "Active" [selected]
+    - option "Inactive"
+- list [virtual-scroll, visible=8]:
+  - option "Item 1" [ref=e10]
+```
+
+### IPC Contract Validation
+
+Verify that UI actions trigger correct IPC commands with expected arguments:
+
+1. `ipc_monitor(action: "start")`
+2. Walk through the user flow step by step
+3. `ipc_get_captured()` -- verify each command name, args shape, and response
+4. Check for: unexpected commands, missing required args, error responses, excessive duplicate calls
+
+### DOM Structure Review
+
+Scope snapshots to specific components for focused review:
+
+```bash
+webview_dom_snapshot(selector: ".ant-form", mode: "ai")
+tauri-connector snapshot -i -s ".ant-form"
+
+# Search DOM for patterns (data-testid coverage, class conventions, etc.)
+webview_search_snapshot(pattern: "data-testid", context: 2)
+```
+
+### Event Flow Verification
+
+Verify correct event sequences after user actions:
+
+1. `ipc_listen(action: "start", events: ["state:update", "ui:refresh", "data:saved"])`
+2. Perform the action being reviewed
+3. `event_get_captured()` -- verify events fired in correct order with expected payloads
+
+For more workflows: read [references/code-review-playbook.md](references/code-review-playbook.md).
+
+---
+
+## Interaction Reference
+
+### Click, Fill, Type
+
+```bash
+# MCP
+webview_interact(action: "click", selector: "@e5")
+webview_interact(action: "click", selector: "button.submit", strategy: "css")
+webview_interact(action: "double-click", selector: "@e3")
+webview_interact(action: "focus", selector: "#email")
+webview_keyboard(action: "type", text: "user@example.com")
+webview_keyboard(action: "press", key: "Enter")
+webview_keyboard(action: "press", key: "a", modifiers: ["ctrl"])
+
+# CLI
+tauri-connector click @e5
+tauri-connector dblclick @e3
+tauri-connector focus @e3
+tauri-connector fill @e3 "user@example.com"    # Clear + set value + fire input/change
+tauri-connector type @e3 "hello"               # Char-by-char with key events
+tauri-connector check @e10                     # Check checkbox
+tauri-connector uncheck @e10                   # Uncheck checkbox
+tauri-connector select @e6 "option1" "opt2"    # Select dropdown
+tauri-connector press Enter
+tauri-connector scroll down 300                # Panel under the viewport centre (0.17.8+), else the page
+tauri-connector scroll down 300 --selector ".list"
+tauri-connector scrollintoview @e20
+```
+
+### Drag and Drop
+
+Three strategies: `auto` (default checks `el.draggable`), `pointer`, `html5dnd`.
+
+```bash
+# MCP
+webview_interact(action: "drag", selector: "@e3", targetSelector: "@e7", steps: 15, durationMs: 500)
+webview_interact(action: "drag", selector: "#item", targetX: 400, targetY: 300, dragStrategy: "pointer")
+
+# CLI
+tauri-connector drag @e3 @e7 --steps 15 --duration 500
+tauri-connector drag "#card" ".drop-zone" --strategy html5dnd
+tauri-connector drag @e5 "400,300"
+```
+
+- **pointer**: `pointerdown` -> paced `pointermove` -> `pointerup`. Works with dnd-kit, SortableJS, custom sliders, resize handles.
+- **html5dnd**: `dragstart` -> `dragenter`/`dragover` -> `drop` + `dragend`. Works with `draggable="true"`, react-beautiful-dnd.
+- Increase `steps` (>5) if the library needs movement threshold. Increase `durationMs` for timing-sensitive libs.
+
+### Wait and Find
+
+```bash
+# MCP
+webview_wait_for(selector: ".loaded", timeout: 10000)
+webview_wait_for(text: "Success", strategy: "text")
+webview_wait_for(url: "**/settings*", loadState: "load", timeout: 10000)
+webview_locator(role: "button", name: "Save", action: "click")
+webview_find_element(selector: "Submit", strategy: "text")
+webview_find_element(selector: "error|warning", strategy: "regex", target: "class")
+
+# CLI
+tauri-connector wait ".loaded" --state visible --timeout 10000
+tauri-connector wait --text "Success"
+tauri-connector wait --url "**/settings*" --load-state load
+tauri-connector locator --role button --name Save --action click
+tauri-connector find "Submit" -s text
+```
+
+### Windows
+
+```bash
+manage_window(action: "list")
+manage_window(action: "resize", width: 1024, height: 768)
+manage_window(action: "focus")          # bring a background window to the front natively
+tauri-connector windows
+tauri-connector windows focus           # same; also --bring-to-front on eval, wait, screenshot
+tauri-connector resize 1024 768 --window-id settings
+```
+
+Multi-window apps: nearly every tool takes `windowId` (CLI: global `--window-id`, default `main`). Each window has its own DOM, refs, console logs, and screenshots -- a snapshot of `main` says nothing about `settings`. List window labels first, then scope every call to the window you're working on.
+
+### Batch Actions
+
+Run several tool calls from one JSON spec -- sequentially, in parallel, or DAG-ordered via `dependsOn` -- and get per-action run logs (status, timing, result/error) in one response. Same spec format everywhere: MCP `batch_actions` tool and CLI `tauri-connector batch`.
+
+```bash
+# MCP -- click, wait, then collect evidence concurrently
+batch_actions(mode: "parallel", actions: [
+  { "id": "open", "tool": "webview_interact", "args": { "action": "click", "selector": "@e5" } },
+  { "id": "settle", "tool": "webview_wait_for", "args": { "selector": ".modal" }, "dependsOn": ["open"] },
+  { "tool": "read_logs", "args": { "level": "error" }, "dependsOn": ["settle"] },
+  { "tool": "webview_screenshot", "args": { "save": true }, "dependsOn": ["settle"] }
+])
+
+# CLI -- spec inline, from a file, or '-' for stdin; save the report to JSON
+tauri-connector batch flow.json --mode parallel --save report.json
+```
+
+Sequential is the default (`stopOnError: true` skips the rest after a failure; `--continue-on-error` / `stopOnError: false` keeps running the remaining actions in order -- only explicit `dependsOn` edges skip). Typed execution and verification decide status; arbitrary business JSON containing `error` is preserved. `parallel` plus `dependsOn` gives a DAG, but conflicting application resources return `resource_busy`. The report (`{ok, total, succeeded, failed, skipped, durationMs, logs[]}`) is returned in the response and, with `save`, also written to a JSON file. Report-save failures preserve execution results with `persistenceWarning`. Use `omitResult: true` on noisy actions to keep logs small; details in `references/mcp-tools.md`.
+
+---
+
+## Snapshot Budget & Subtree Files
+
+Snapshots default to a 4000-token budget on every path (MCP, WebSocket/Bun, CLI): larger DOMs return an inline layout skeleton plus `file=subtree-K.txt` markers pointing at on-disk subtree files (absolute paths in `meta.subtreeFiles[].path` -- open with the Read tool, or `tauri-connector snapshots read <uuid> <file>`). `webview_search_snapshot` always matches the merged full text -- skeleton plus every subtree -- so spilled content is never invisible to search. When hunting for something specific, search beats raising the budget. When overlays (modals, floating windows) are open, overlay sections render inline first -- focused, then z-order -- so the open modal never spills; the background page spills instead (see "Modals, Floating Windows & Overlays"). Splitting recurses into oversized wrappers, and the CLI caches every ref (inline and spilled).
+
+```bash
+webview_dom_snapshot(mode: "ai", maxTokens: 8000)        # raise the budget
+webview_dom_snapshot(mode: "ai", maxTokens: 0)           # full inline output (the embedded MCP server ignores noSplit; CLI: --no-split)
+webview_search_snapshot(pattern: "submit|confirm", context: 3)
+tauri-connector snapshots list                           # then: snapshots read <uuid> subtree-0.txt
+```
+
+Splitting mechanics, sibling collapsing, storage layout, and session pruning: read [references/snapshot-budget.md](references/snapshot-budget.md).
+
+## Artifacts
+
+Screenshots taken with `save: true` / the CLI `screenshot` command are registered in a manifest, so later calls can reference them by `artifactId` instead of a path:
+
+```bash
+# MCP
+artifact_list(kind: "screenshot", limit: 20)       # newest first
+artifact_read(artifactId: "<id>")                  # metadata + base64 content
+artifact_compare(before: "<id>", after: "<id>")    # byte-diff -- see Visual Regression Check
+artifact_prune(keep: 50, deleteFiles: true)        # keep the newest 50, drop the rest
+
+# CLI
+tauri-connector artifacts list --kind screenshot -l 20
+tauri-connector artifacts show <id> --base64
+tauri-connector artifacts compare <beforeId> <afterId>
+tauri-connector artifacts prune --keep 50
+```
+
+Long sessions accumulate screenshots fast -- prune when a debugging episode ends. Prune keeps the newest `keep` entries (default 50; scoped to `kind` when given, other kinds untouched) and deletes pruned files from disk by default -- pass `--manifest-only` (CLI) / `deleteFiles: false` (MCP) to rewrite only the registry.
+
+---
+
+## Ant Design / React Apps
+
+The snapshot engine reads `__reactFiber$` internals to show component names, detects portals via `aria-controls`/`aria-owns` and stitches them to their triggers, and annotates virtual scroll containers.
+
+Scope to Ant Design components:
+
+```bash
+webview_dom_snapshot(selector: ".ant-modal-content")   # Modal
+webview_dom_snapshot(selector: ".ant-drawer-body")     # Drawer
+webview_dom_snapshot(selector: ".ant-form")            # Form
+webview_dom_snapshot(selector: ".ant-table-wrapper")   # Table
+```
+
+## Modals, Floating Windows & Overlays
+
+Full-document `ai`/`accessibility` snapshots detect open overlays -- modals, floating windows, drawers, docks, lock screens -- whether they come from antd or a custom modal system. Detection: `role="dialog"`/`"alertdialog"`, open `<dialog>`/popover, any visible `position:fixed` element with a numeric z-index and real size, or an explicit `data-connector-overlay` attribute. The snapshot leads with a one-line inventory and `meta.overlays[]` carries the details:
+
+```
+# overlays: o1 "Create Patient" [focused, modal, z=1000, 640x500] | o2 "Lab Orders" [z=702, 520x420] -- rescope via meta.overlays[].selector
+```
+
+- Ordering is focused-first, then z-order descending -- the overlay the user is actually working in comes first. Under a token budget, when the page does not fit, each overlay renders inline first and its place in the page tree shows `- [overlay oN: shown above]`, so the open modal never spills to subtree files; the background page spills instead. Output that fits keeps DOM order.
+- Each entry's `selector` addresses that exact instance (`#id` → `[data-modal-key="…"]` → `[data-testid="…"]` → a stamped `[data-connector-overlay="oN"]` fallback). Rescope with `webview_dom_snapshot(selector: <that selector>)` (CLI: `tauri-connector snapshot -i -s '<that selector>'`) to capture one modal precisely -- this works even when several same-class windows are open at once.
+- Stamped `data-connector-overlay` values stick to the element across snapshots, while `oN` ids re-rank on every snapshot -- so a stamp may lag the current id. Always address an overlay by its reported `meta.overlays[].selector`; never reconstruct `[data-connector-overlay="oN"]` from the id.
+- `modal` is true only for genuinely blocking layers (`aria-modal="true"`, a viewport-covering layer, or a backdrop mask); non-blocking floating windows report `modal: false` because the background stays interactive.
+- Overlay tree nodes are annotated in place: `[overlay=o1, z=1000, focused, modal]`.
+- Scoped snapshots (any `selector`) skip overlay detection and no longer pull unrelated `ant-`/`rc-` body portals into the result -- a rescoped modal snapshot contains that modal only. Portals linked from inside the scope via `aria-controls`/`aria-owns` still stitch in.
+- Minimized or closed-but-mounted modals (`display:none`) are excluded like any hidden content; to inspect one's preserved form state, scope directly to it (e.g. `selector: '[data-modal-key="…"]'`).
+- An expected modal absent from both the tree and the overlays header is probably a separate Tauri window, not in-page DOM: `manage_window(action: "list")`, then re-snapshot with the right `windowId`.
+- Building a custom modal system? Give each modal root `role="dialog"` plus `aria-label`/`aria-labelledby` (an accessibility win regardless), or stamp it `data-connector-overlay` -- either guarantees detection with a stable title. A `data-modal-key` per instance gives rescoping a semantic, stable selector.
+
+### Example: multi-window floating-window systems
+
+Apps with several non-blocking dialog windows open and typeable at once (SelfModal-style: portal-to-body roots carrying `role="dialog"`, `aria-modal="false"`, and a semantic `data-modal-key`) map onto the overlay tools like this:
+
+- Every open window is its own overlay entry with `modal: false` -- the background staying interactive is the system's design, so never read `modal: false` as "not a real dialog".
+- Scope by the reported `[data-modal-key="…"]` selector, never by "the dialog" or an nth-match -- several same-class windows coexist by construction.
+- Stacking is live: pointer-down inside a window typically re-ranks z-order, so overlay ids and ordering shift between snapshots. Re-read the `# overlays:` header after interactions instead of caching it.
+- Expect layered z bands: floating windows low, genuinely blocking dialogs (confirm, login) above them, and a minimized-window dock pinned near the top of the stack. The dock is detected as an overlay too; its tiles are the restore controls for minimized windows.
+- Minimized or closed-but-kept windows usually stay mounted as `display:none` to preserve form state: they are correctly absent from snapshots and the overlays list, but a scoped snapshot by their stable selector still reads the hidden content.
+
+## Bun Script Fallback
+
+When MCP and CLI are unavailable. Requires `bun` runtime:
+
+```bash
+SCRIPTS=<directory-containing-this-SKILL.md>/scripts
+bun run $SCRIPTS/snapshot.ts              # DOM snapshot with refs
+bun run $SCRIPTS/click.ts "button.submit" # Click element
+bun run $SCRIPTS/fill.ts "input" "value"  # Fill input
+bun run $SCRIPTS/drag.ts "@e3" "@e7"      # Drag between refs
+bun run $SCRIPTS/hover.ts ".trigger"      # Hover (--off to leave)
+bun run $SCRIPTS/logs.ts 50               # Console logs
+bun run $SCRIPTS/screenshot.ts /tmp/s.png # Screenshot
+bun run $SCRIPTS/eval.ts "document.title" # Execute JS
+bun run $SCRIPTS/resources.ts            # List quarantines (release <requestId> | release --all)
+bun run $SCRIPTS/find.ts "button"         # Find elements
+bun run $SCRIPTS/wait.ts ".loaded"        # Wait for selector
+bun run $SCRIPTS/state.ts                 # App metadata
+bun run $SCRIPTS/windows.ts              # List windows
+bun run $SCRIPTS/events.ts listen user:login  # Listen for events
+bun run $SCRIPTS/workflow.ts capabilities     # Workflow lifecycle: run|get|cancel|resume|capabilities '<args JSON>' or @file.json
+```
+
+## Upgrade an existing app and test it
+
+For a dependency upgrade or live smoke test, read [references/upgrade-and-smoke.md](references/upgrade-and-smoke.md). It covers focused lockfile updates, shared-target detection, isolated launch/configuration, exact app/port selection, ephemeral workflow credentials and a local form test with an independently checked click count. Rebuild the app after changing the plugin; updating the CLI alone cannot update a running WebView.
+
+## Setup
+
+For first-time setup in a Tauri v2 project, read [SETUP.md](SETUP.md). The skill defaults to the **feature-gated** pattern (cleaner release builds; legacy `cfg(debug_assertions)` still supported as Alternative). Summary:
+
+1. `tauri-plugin-connector = { version = "0.17.10", optional = true }` in `src-tauri/Cargo.toml`
+2. Declare the cargo feature: `[features] dev-connector = ["dep:tauri-plugin-connector"]`
+3. Register the plugin with `#[cfg(feature = "dev-connector")]` guard
+4. Drop the dev capability JSON at `src-tauri/capabilities-dev/dev-connector.json` (outside the default `capabilities/` glob), and register it at runtime via `app.add_capability(include_str!("../capabilities-dev/dev-connector.json"))` inside the same `cfg(feature = "dev-connector")`
+5. Set `"withGlobalTauri": true` in `tauri.conf.json`
+6. Install `@zumer/snapdom` for screenshot fallback
+7. Add `"tauri:dev": "tauri dev --features dev-connector"` to `package.json`
+8. Add `"url": "http://127.0.0.1:9556/mcp"` to `.mcp.json`
+
+For the legacy alternative, swap step 1 to `tauri-plugin-connector = "0.17.10"`, drop step 2, replace step 3 with `#[cfg(debug_assertions)]`, replace step 4 with `"connector:default"` in `src-tauri/capabilities/default.json`, and skip step 7. `tauri-connector doctor` accepts both — it auto-detects the active pattern.
+
+CLI install: `brew install dickwu/tap/tauri-connector`
+
+### Verify setup with `doctor`
+
+Before troubleshooting a broken connection, DOM bridge timeout, or missing MCP tools, run `tauri-connector doctor` from the project root. It validates every setup step in one pass and prints a concrete `Fix:` line for anything missing or misconfigured -- faster than walking `.mcp.json`, `tauri.conf.json`, capabilities, etc. by hand.
+
+```bash
+tauri-connector doctor                 # full checklist (text)
+tauri-connector doctor --no-runtime    # skip live WS/MCP probes (offline / CI)
+tauri-connector doctor --json          # machine-readable output (exit code 0/1)
+```
+
+The `--json` payload includes a top-level `setup_pattern` field with one of `"feature-gated" | "legacy" | "mixed" | "none"` — branch on this in CI to apply pattern-specific gates without re-parsing the section list.
+
+It checks four areas -- environment, plugin setup (both install patterns), live runtime (PID file, WebSocket ping, bridge status, MCP lifecycle), and integrations -- and its output enumerates every check it ran. Exit code is 1 when any check fails (✗ / `"status":"fail"`; warnings never fail the run). Since 0.17.8 a running app whose connector did not start (its PID file carries `startup_error`, e.g. an exact port in use) and an explicit `--pid-file` that cannot be read are failures too, rather than probing ports another app may own, and the `--json` payload includes a top-level `fixes` array with every remediation, so it drops cleanly into CI or pre-commit. Use `--no-runtime` when the Tauri app isn't running (offline setup validation).
+
+A missing `connector:default` stays a failure even when WS/eval/screenshot work: frontend-to-Rust push commands (push_dom, push_logs, set_pointed_element, push_ipc_event, push_capture_events, capture_self_test, push_event, push_runtime) need that capability. Doctor explains this distinction.
+
+First move when something looks wrong: `tauri-connector doctor`. Second move: read the `Fix:` line.
+
+### Version check & doc freshness
+
+This skill's frontmatter `version:` records which connector release these docs describe. The installed CLI/plugin may be newer: compare with `tauri-connector --version` (the MCP initialize response also reports `serverInfo.version`), and check for newer releases with `tauri-connector update --check`. `tauri-connector doctor` flags stale local skill docs as part of its integration checks.
+
+When the binary is newer than this doc, trust the CLI-bundled copies -- they always match the binary:
+
+```bash
+tauri-connector skills list
+tauri-connector skills get tauri-connector            # version-matched SKILL.md
+tauri-connector skills get snapshot-budget
+tauri-connector skills path references/mcp-tools.md
+```
+
+Refresh the installed skill itself with `npx skills add dickwu/tauri-connector`.
+
+## Deep Reference
+
+For full parameter tables and extended workflows:
+
+| File | Contents |
+|---|---|
+| `references/mcp-tools.md` | MCP tool parameter tables with types and defaults |
+| `references/cli-commands.md` | Every CLI subcommand with all flags and examples |
+| `references/snapshot-budget.md` | Snapshot splitting mechanics, subtree files, storage and pruning |
+| `references/debug-playbook.md` | Step-by-step recipes for common debug scenarios |
+| `references/code-review-playbook.md` | Code review workflow recipes and checklists |
+| [references/upgrade-and-smoke.md](references/upgrade-and-smoke.md) | Focused app upgrade, isolated startup and real WebView smoke test |
+
+## Troubleshooting
+
+Run `tauri-connector doctor` first -- it catches most of the issues below in one pass and prints the exact fix.
+
+| Problem | Fix |
+|---|---|
+| Any setup problem | `tauri-connector doctor` -- prints a `Fix:` line for each missing/misconfigured piece |
+| `Permission connector:default not found` in release `tauri build` | The connector capability JSON is being loaded by `tauri-build`'s default `./capabilities/**/*` glob. Migrate to the feature-gated layout: move it to `src-tauri/capabilities-dev/dev-connector.json` and register it at runtime via `app.add_capability(include_str!(...))` inside `cfg(feature = "dev-connector")`. Re-run `tauri-connector doctor`. |
+| `tauri build` still compiles the plugin / pulls xcap, aws-sdk-s3 | Plugin is gated on `cfg(debug_assertions)` (legacy). Migrate to `cfg(feature = "dev-connector")` with `optional = true` so the dep is skipped entirely when the feature is off. Doctor's legacy nudge has the full migration checklist. |
+| Connection refused | App not running or plugin not loaded. Check: `lsof -i :9555 \| grep LISTEN` |
+| Stale PID file | Verify its PID and executable are no longer live. Use the new launch's actual PID path/ports; remove only a stale record you own, especially when target directories are shared |
+| Port conflict / need a fixed port | 0.17.7: set `TAURI_CONNECTOR_PORT` (WS) / `TAURI_CONNECTOR_MCP_PORT` / `TAURI_CONNECTOR_BRIDGE_PORT` in the app's env, or `ConnectorBuilder::new().port(9600)` / `.mcp_port(..)`, to bind exactly that port; a busy exact port fails the connector's startup with a logged error, never a fallback; 0.17.8 records it in the PID file, so `status` shows the app as `failed` with the reason. Use `*_PORT_RANGE` env vars or `.port_range(9600, 9700)` to scan a range instead. Precedence: builder exact > env exact > env range > builder range > default. The same `TAURI_CONNECTOR_PORT` in the client's env is the CLI's `--port` default |
+| Refs not found | DOM changed since snapshot. Re-run snapshot for fresh refs |
+| Acting on the wrong window | Pass `windowId` (MCP) / `--window-id` (CLI). Default is `main`; each window has independent DOM and refs |
+| Bridge not connected | Eval+event fallback is permitted only before dispatch, within the remaining deadline. Persistent slowness: check `tauri-connector bridge` and `withGlobalTauri: true` |
+| Disk filling with screenshots | `tauri-connector artifacts prune --keep 50` (MCP: `artifact_prune`) |
+| Drag not working | Try explicit `--strategy pointer` or `html5dnd`. Increase `--steps` (>5) and `--duration` |
+| Screenshot blank | If `screen_locked`, unlock first (0.17.9 refuses captures promptly). On an unlocked desktop, install `@zumer/snapdom` for DOM-based fallback capture |
+| No MCP tools | Verify `.mcp.json` has `"url": "http://127.0.0.1:9556/mcp"` and app is running |
+| Bridge not connecting | Check `withGlobalTauri: true` in tauri.conf.json. Bridge auto-reconnects every 1s |
+| Bridge/snapshot engine vanishes after a page reload or dev-server hot reload | Plugin < 0.13.1 injected the bridge once per webview, so reloads killed it until app restart. Upgrade `tauri-plugin-connector` to >= 0.13.1 (re-injects on every page load) |
+| Logs empty | Console interception starts on bridge connect. Ensure plugin is registered before app loads |
+| `unauthorized` from a `workflow_*` call, or `status` shows `unauthorized` | For workflows: the host has no workflow token, or one shorter than 32 bytes (ignored with a stderr warning). For discovery/inspection: the host has a token and the client did not supply it. Set `TAURI_CONNECTOR_WORKFLOW_TOKEN` before launching the app (or call `ConnectorBuilder::workflow_token`), and give the same value to the CLI / standalone MCP environment or the embedded `authToken` argument. `workflow capabilities` reports `authentication.configured` |
+| `status` shows `legacy_plugin`, or `--app-id`/`--pid-file` fails with `capability_unavailable: ... older than 0.16.0` | The app embeds a tauri-plugin-connector from before 0.16.0, which cannot report its identity, so identity routing cannot verify it. Upgrade the host app's plugin (0.17.2 or later recommended) and restart it; meanwhile `--port <ws_port>` connects without identity verification. A bare `identity` call on such an app returns `capability_unavailable: ... predates inspection protocol v1` |
+| `app_not_found` for a packaged `.app` opened with `open` | Before 0.17.8 the CLI looked only under `target/` and in the port scan; a bundle outside `target/` records itself in `<app data>/<identifier>/.tauri-connector/.connector.json`, which 0.17.8 reads. The error now lists what it checked. If the app answers `unauthorized`, set `TAURI_CONNECTOR_WORKFLOW_TOKEN` to the app's token; a background window needs `--bring-to-front` |
+| `stale_pid_file: ... refusing ...` / `... did not attach to it` | A `.connector.json` near the working directory names an app that is no longer running (or whose port now answers as another process), so discovery refuses to attach to the different app the port scan found. Start the app again, delete the stale file, or choose the other app explicitly with `--app-id`/`--port`; `--any-app` (`TAURI_CONNECTOR_ANY_APP=1` for the standalone MCP server) restores the old pick-the-only-app behaviour |
+| `project_mismatch` / `ambiguous_app` listing several projects | Several apps share 9555/9556. Run `tauri-connector status` to see each instance's `project=`, then pass `--project <name>` (CLI), `TAURI_CONNECTOR_PROJECT` or `tauri-connector-mcp --project <name>`. A command run inside another project's directory refuses the only running app; use `--project`/`--port`, or `--any-app`. Give two apps with the same `productName` distinct names with `ConnectorBuilder::new().project_name("...")`. `doctor` fails when `.mcp.json` points at another app's or another checkout's MCP port. Older plugins show `unknown project` |
+| `capability_unavailable` on `workflow` | The app runs a plugin older than 0.15 (`bridge_status` lacks `workflowProtocolVersion: 1`). Upgrade `tauri-plugin-connector`; single tools and `batch` keep working meanwhile |
+| `run_key_conflict` | The same `runKey` was reused with a different spec. Recover a lost submission with the identical spec; use a new key only for genuinely new work |
+| `resource_busy` | Another workflow, batch, or single tool (screenshots and snapshots included) held the same window resource for longer than the 15 s queue wait (0.17.6+; before that, conflicts failed at once), or an uncertain write is quarantined there (no wait). Follow the run's allowed next actions. Since 0.17.8 a quarantine expires on its own after 60 s (the message says how long is left); never treat contention or expiry as permission to replay a write. With `quarantined: true`, the error lists the quarantining `requestId` and `reason`; a late effect-free page result lifts it automatically, otherwise check the app and run `tauri-connector resources release <requestId>` (MCP `resources`). Failures that provably dispatched nothing do not quarantine: a `webview_execute_js` script that throws or rejects with `effect: none` or on a Tauri permission denial (`ipc_not_allowed`, 0.17.8+), and failed screenshots, snapshots, element lookups, style reads, and waits |
+| `page_navigating` / `page_not_ready` (`retryableBeforeDispatch: true`) | 0.17.6+: the page was reloading or navigating, or the new page was not ready within the deadline, so nothing was sent. This includes a command sent right after a script that called `location.reload()`, set `location` or submitted a form: it is refused instead of running on the old page, and the script is never replayed. Wait briefly and send it again |
+| `bridge_not_connected` / `window_not_ready` | 0.17.8+: no webview has connected yet (app starting, dev server compiling, page reloading; refused after about 3 s) or no window with that label exists yet (refused at once). `dispatched: false`, nothing quarantined; wait a moment and retry, or check `tauri-connector windows` for the label |
+| `screen_locked` | macOS: unlock the desktop and retry; focusing cannot unlock it. Since 0.17.9 every screenshot source (including default/legacy and `--bring-to-front`) refuses before native capture/runtime probing; a lock arriving during capture aborts the read promptly instead of returning a solid image or waiting for a generic timeout. Eval refusals name `screen_locked` first and never suggest `--bring-to-front` as its remedy. Already-dispatched writes retain `outcome_unknown` and their lock note. `status` and `runtime-health` report `screenLocked` |
+| `window_not_visible` on `eval`, `snapshot` or a screenshot | 0.17.6+: the window is in the background (minimised, hidden or covered) and its page did not answer within 1.5 s, so the command was not sent and nothing is quarantined. Since 0.17.8 a `snapshot` of a natively hidden or minimised window is refused at once, every time, without probing. `tauri-connector windows focus` or `--bring-to-front`, then retry |
+| `warning: ... binaries on PATH`, `CLI ... older than the connected app's plugin`, `homebrew tap ... behind` in `status`/`doctor` | 0.17.6+ version checks. Remove the stale copy (often `~/.cargo/bin/tauri-connector`: `cargo uninstall connector-cli`, then `hash -r`); upgrade the CLI with `brew update && brew upgrade tauri-connector` (`brew update` refreshes the tap first), or the app's plugin with `cargo update -p tauri-plugin-connector -p connector-client --precise 0.17.10` for crates.io (git dependencies omit `--precise`; see the upgrade guide) |
+| `outcome_unknown` / `effect: possible` | The action was dispatched but its result was lost (timeout, disconnect). Read `workflow_get`, then `resume --intent reconcile`; do not resubmit under a fresh key. The quarantine on that window persists until the page settles late without effects, `resources release`, an app restart, or (0.17.8+) its 60 s expiry |
+| `persistence_unavailable` | The workflow journal cannot use private storage (Windows, or an unusable app data dir). Workflows fail closed; conflicting legacy writes may also be blocked until recovery is safe. Read-only diagnostics remain available |
+| Wait timed out inside `batch`, or `act_and_verify` verdict `failed` | Since 0.15 these are real failures (`condition_timeout`, `postcondition_failed`): the action fails and its dependents skip. Inspect the failed condition and effect first; adjust future test budgets only when justified, without replaying a possibly completed write |
