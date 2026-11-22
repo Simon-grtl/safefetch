@@ -1,0 +1,285 @@
+{
+  "version": 2,
+  "skills": {
+    "adding-tauri-splashscreen": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-splashscreen/SKILL.md",
+      "computedHash": "42fca60d4efae16863a07c546d554c2842f5b9a2f65f9f23d1237f03a53c390e"
+    },
+    "adding-tauri-system-tray": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-system-tray/SKILL.md",
+      "computedHash": "7a0d2a50181c85a22916e851f98784438e0f880f64dfb5767a8d64c2e8a7deb6"
+    },
+    "building-tauri-with-github-actions": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-pipeline-github/SKILL.md",
+      "computedHash": "e4c83ba0bffda0a1589b52fadb7a0e2ff9ca4112a9ddd53571976ddca1938b19"
+    },
+    "calling-frontend-from-tauri-rust": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-calling-frontend/SKILL.md",
+      "computedHash": "166625a541e157c977a8f2692c95e1e37de2532fb6e7c6e46c3359f881675598"
+    },
+    "calling-rust-from-tauri-frontend": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-calling-rust/SKILL.md",
+      "computedHash": "2b6c484fc2d42e4e08eb46d1391a873c223308f4a405e67093d70e3d43f44cd8"
+    },
+    "configuring-tauri-apps": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-configuration/SKILL.md",
+      "computedHash": "b8471a653b91b9e9ae925864b8903fa305bf53e6ecf5e024e09dc03b54576a61"
+    },
+    "configuring-tauri-capabilities": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-capabilities/SKILL.md",
+      "computedHash": "6cba53d596b43ed6600e72210e8931e4a9b65a87c0ccf8a8394522fe36703599"
+    },
+    "configuring-tauri-csp": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-csp/SKILL.md",
+      "computedHash": "b0eb3223e3562460e2d0781764f6e81d04de969151bb5554ca0bea7a1de83cad"
+    },
+    "configuring-tauri-http-headers": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-http-headers/SKILL.md",
+      "computedHash": "c03c706223104f351d706b5fbc80d16cd02eda7357f05032f69bbcb1ac1112b0"
+    },
+    "configuring-tauri-permissions": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-permissions/SKILL.md",
+      "computedHash": "b2d9c16d7ebf0d341e1b5ddab3a69d8f6fc32e903e00a53c44634432c1aead6b"
+    },
+    "configuring-tauri-scopes": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-scope/SKILL.md",
+      "computedHash": "7be6ccbeb2fcd59ac9aa282dda4aa19ba5bec68d6d830da5a1e5331ce4235908"
+    },
+    "customizing-tauri-windows": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-window-customization/SKILL.md",
+      "computedHash": "c1bd6c6e99006495c8b22d768c6acecb7b2c1b4dcfca14475d60ffa19def13d1"
+    },
+    "debugging-tauri-apps": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-debugging/SKILL.md",
+      "computedHash": "391e6bf381654576edc867e11d0025ca63a38734cde9d39d6bf37958ad3bde9f"
+    },
+    "developing-tauri-plugins": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-plugins/SKILL.md",
+      "computedHash": "12100cb5718fdd3d10393c6cad45c312a1241be6d8cc36aeffe7ee3ca41ec1d1"
+    },
+    "distributing-tauri-for-android": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-android-distribution/SKILL.md",
+      "computedHash": "7f6d6a180e270c232c9d9cbd9d6d92484d0f905c3b26134a8308bcd423550bda"
+    },
+    "distributing-tauri-for-ios": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-ios-distribution/SKILL.md",
+      "computedHash": "dda11983be107908e2f5c9cb932afa6da52515a3688ed77bf087964048701538"
+    },
+    "distributing-tauri-for-macos": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-macos-distribution/SKILL.md",
+      "computedHash": "cc04aec366b1a7f57bccd1c1cdb8adb3dbf159f6e4ee55df21b79b857eee3d28"
+    },
+    "distributing-tauri-for-windows": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-windows-distribution/SKILL.md",
+      "computedHash": "0bf98e91aea89fd4f1432e69cfa4657172da80f48133c76e34745b443172d25a"
+    },
+    "embedding-tauri-sidecars": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-sidecar/SKILL.md",
+      "computedHash": "87aeb07266be52a5b49399a550a211392178231b8caac0481ed2daa3c979b1f7"
+    },
+    "integrating-tauri-js-frontends": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-frontend-js/SKILL.md",
+      "computedHash": "b1118a7e6276c731363ba6ff855fd48471027bf560ca9b791091b1305bf33f61"
+    },
+    "integrating-tauri-rust-frontends": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-frontend-rust/SKILL.md",
+      "computedHash": "eae247589d41e4d3154b670adaab372844b1ba48aeeef57b404bee4d0753c5f5"
+    },
+    "listening-to-tauri-events": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-frontend-events/SKILL.md",
+      "computedHash": "3f5c4cad09d802258bc0ebf2a0f31a602c97d2a69a118ba00bd4ea18b3b25316"
+    },
+    "managing-tauri-app-resources": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-app-resources/SKILL.md",
+      "computedHash": "b66bee14d213c5d6fba122f587c2aa9a737485359510c30c1e957fdaf3032822"
+    },
+    "managing-tauri-plugin-permissions": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-plugin-permissions/SKILL.md",
+      "computedHash": "a8f114b7d0f80de50a615d779ca81b48b31d9a42b4130092be1b50c7fe82a055"
+    },
+    "migrating-tauri-apps": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-migration/SKILL.md",
+      "computedHash": "da95f31b8cf39f6e1ab0eb7c880c2848a4f803b0a91e41d9fa54f9a7a5aa8048"
+    },
+    "optimizing-tauri-binary-size": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-binary-size/SKILL.md",
+      "computedHash": "eb31c1b54c073843c2fb04a17cfd2c163b6cf2fd820cbba24916de8e3fc0e1d2"
+    },
+    "packaging-tauri-for-linux": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-linux-packaging/SKILL.md",
+      "computedHash": "097f48211a706eed8a5d6d1cdad890586de9f2a47b89e06f4ad81e4324bafebe"
+    },
+    "running-nodejs-sidecar-in-tauri": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-nodejs-sidecar/SKILL.md",
+      "computedHash": "19a71903bd6b3ec5cacf7ff8f5528d0ccde1318e6655c6c0d387b2c6f72e96a6"
+    },
+    "setting-up-tauri-projects": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-project-setup/SKILL.md",
+      "computedHash": "fcd5a6c4548f91a512abacc4d053653293885538bf312875822f47ac2a23c616"
+    },
+    "signing-tauri-apps": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-code-signing/SKILL.md",
+      "computedHash": "6b22677224fc1627e17a44aa3ab64f06d1399e4f94569ab0ed4a7a44b1bae715"
+    },
+    "tauri-connector": {
+      "source": "dickwu/tauri-connector",
+      "commit": "e4f2804821c2d3212aa0a3fc80b86eea52c016d0",
+      "sourceType": "github",
+      "skillPath": "skill/SKILL.md",
+      "computedHash": "6bddc3c4a6dc8a0d0a4ea200caf7ecb02b84076cafca882e20afc77141008e96"
+    },
+    "testing-tauri-apps": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-testing/SKILL.md",
+      "computedHash": "2c938e1db7ddf635c49addec223bf63deccd09c4f2ca8a277ea747a6c635c787"
+    },
+    "understanding-tauri-architecture": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-architecture/SKILL.md",
+      "computedHash": "d907ee5ab31ba021f01cb831bb8efbe7b540d0176933ab55e443704618083422"
+    },
+    "understanding-tauri-ecosystem-security": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-ecosystem-security/SKILL.md",
+      "computedHash": "c2600cc8773585d4228fcc8f18e883d42e5b7c49e23916290e72d59a9451c8dc"
+    },
+    "understanding-tauri-ipc": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-ipc/SKILL.md",
+      "computedHash": "c7904cb6375d51a6db53ebad2e329eb1684c120b0553e73575be4dedb0e408b5"
+    },
+    "understanding-tauri-lifecycle-security": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-lifecycle-security/SKILL.md",
+      "computedHash": "a96c6572c6a6cbd69d144e17aef16d813a84949c5765ae8dcb80eb7243dc13f5"
+    },
+    "understanding-tauri-process-model": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-process-model/SKILL.md",
+      "computedHash": "4175a7c58b601746118a0111108335325e0d6358210c0116f13c82ef3005bfe1"
+    },
+    "understanding-tauri-runtime-authority": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-runtime-authority/SKILL.md",
+      "computedHash": "89912452c305ad6ea91c9c8dbb16141fbf1ba2cdbe4dbdeca70b95d6894fda13"
+    },
+    "updating-tauri-dependencies": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-updating-dependencies/SKILL.md",
+      "computedHash": "fb085702269e36501352073a7e9ad130782d1b033b1d3a57369d080e3addcbdf"
+    },
+    "using-crabnebula-cloud-with-tauri": {
+      "source": "dchuk/claude-code-tauri-skills",
+      "commit": "855352dfbc2527f5a7e4ed307782d2a487bffd66",
+      "sourceType": "github",
+      "skillPath": "tauri/tauri-crabnebula/SKILL.md",
+      "computedHash": "10acf9d881f61c4b0a5f3581cb02109a8dbb37f24c14cbfe9df926d988c0a127"
+    }
+  }
+}
