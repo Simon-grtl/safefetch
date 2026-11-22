@@ -1448,6 +1448,37 @@ impl Inner {
             j.snap.stage = Stage::Scanning;
             j.snap.speed_bps = 0;
         });
+        // Publisher's checksum list given instead of a SHA-256. Network I/O:
+        // fetched BEFORE taking the scan lock, under an overall deadline.
+        let mut expected = meta.expected_sha256.clone();
+        let mut checksum_list = None;
+        if let Some(list) = meta
+            .checksum_url
+            .as_deref()
+            .and_then(|u| Url::parse(u).ok())
+        {
+            // Most trusted first: the link typed by the user, then the
+            // redirect target, then the name the server chose.
+            let mut names = Vec::new();
+            for u in [Some(meta.url.as_str()), meta.final_url.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(n) = Url::parse(u).ok().as_ref().and_then(filename_from_url) {
+                    names.push(n);
+                }
+            }
+            names.push(meta.file_name.clone());
+            let (found, result) = self.fetch_checksum_list(&list, &names, &s, &cancel).await;
+            if found.is_some() {
+                expected = found;
+                self.update(id, |j| j.snap.expected_sha256 = expected.clone());
+            }
+            checksum_list = Some(result);
+            if cancel.load(Ordering::Relaxed) {
+                return Err(Error::Cancelled);
+            }
+        }
         let _scan = self.scan_lock.lock().await;
         if cancel.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
@@ -1487,30 +1518,6 @@ impl Inner {
             return Ok(Outcome::AlreadyDownloaded { path });
         }
 
-        // Publisher's checksum list given instead of a SHA-256.
-        let mut expected = meta.expected_sha256.clone();
-        let mut checksum_list = None;
-        if let Some(list) = meta
-            .checksum_url
-            .as_deref()
-            .and_then(|u| Url::parse(u).ok())
-        {
-            let mut names = vec![meta.file_name.clone()];
-            for u in [meta.final_url.as_deref(), Some(meta.url.as_str())]
-                .into_iter()
-                .flatten()
-            {
-                if let Some(n) = Url::parse(u).ok().as_ref().and_then(filename_from_url) {
-                    names.push(n);
-                }
-            }
-            let (found, result) = self.fetch_checksum_list(&list, &names, &s, &cancel).await;
-            if found.is_some() {
-                expected = found;
-                self.update(id, |j| j.snap.expected_sha256 = expected.clone());
-            }
-            checksum_list = Some(result);
-        }
         let verdict = self
             .analyze(
                 id,
@@ -1697,6 +1704,34 @@ impl Inner {
         s: &Settings,
         cancel: &AtomicBool,
     ) -> (Option<String>, ChecksumListResult) {
+        let deadline = Duration::from_secs(checksums::FETCH_DEADLINE_SECS);
+        match tokio::time::timeout(
+            deadline,
+            self.fetch_checksum_list_inner(list, names, s, cancel),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => (
+                None,
+                ChecksumListResult::Unavailable {
+                    source: display_url(list),
+                    error: format!(
+                        "not received within {} seconds",
+                        checksums::FETCH_DEADLINE_SECS
+                    ),
+                },
+            ),
+        }
+    }
+
+    async fn fetch_checksum_list_inner(
+        &self,
+        list: &Url,
+        names: &[String],
+        s: &Settings,
+        cancel: &AtomicBool,
+    ) -> (Option<String>, ChecksumListResult) {
         let source = display_url(list);
         let unavailable = |error: String| {
             (
@@ -1746,6 +1781,9 @@ impl Inner {
         }
         let mut body = Vec::new();
         loop {
+            if cancel.load(Ordering::Relaxed) {
+                return unavailable("cancelled".into());
+            }
             match tokio::time::timeout(Duration::from_secs(s.idle_timeout_secs), resp.chunk()).await
             {
                 Ok(Ok(Some(c))) => {
@@ -1764,7 +1802,7 @@ impl Inner {
             return unavailable("no SHA-256 found in this file".into());
         }
         match checksums::find(&entries, names) {
-            Some(e) => (
+            checksums::Lookup::Found(e) => (
                 Some(e.sha256.clone()),
                 ChecksumListResult::Found {
                     source,
@@ -1775,7 +1813,10 @@ impl Inner {
                     },
                 },
             ),
-            None => (None, ChecksumListResult::NotListed { source }),
+            checksums::Lookup::NotListed => (None, ChecksumListResult::NotListed { source }),
+            checksums::Lookup::Conflict(names) => {
+                (None, ChecksumListResult::Conflict { source, names })
+            }
         }
     }
 

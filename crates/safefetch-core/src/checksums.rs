@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 
 /// A checksum list larger than this is refused (real lists are a few KiB).
 pub const MAX_LIST_SIZE: u64 = 1024 * 1024;
+/// Overall deadline for fetching a list (connect + redirects + body).
+pub const FETCH_DEADLINE_SECS: u64 = 120;
 
 /// Result of checking a file against a checksum list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +24,10 @@ pub enum ChecksumListResult {
     NotListed { source: String },
     /// The list could not be fetched or parsed.
     Unavailable { source: String, error: String },
+    /// The names this file goes by (link, redirect target, server-supplied
+    /// name) point to DIFFERENT entries: the server may be passing off another
+    /// listed file as the one requested.
+    Conflict { source: String, names: Vec<String> },
 }
 
 /// One `hash  name` entry.
@@ -86,33 +92,57 @@ fn base_name(name: &str) -> &str {
     n.rsplit(['/', '\\']).next().unwrap_or(n)
 }
 
-/// Find the entry for a file. `candidates` are the names the file may have
-/// (name from the server, last segment of the final and original URLs).
-/// A list with a single entry and no usable name (e.g. `file.iso.sha256`
-/// containing only the hash) matches that single entry.
-pub fn find<'a>(entries: &'a [Entry], candidates: &[String]) -> Option<&'a Entry> {
-    let wanted: Vec<&str> = candidates
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Lookup<'a> {
+    Found(&'a Entry),
+    NotListed,
+    /// Candidate names match entries with different hashes.
+    Conflict(Vec<String>),
+}
+
+fn entry_for<'a>(entries: &'a [Entry], name: &str) -> Option<&'a Entry> {
+    entries
+        .iter()
+        .find(|e| base_name(&e.name) == name)
+        .or_else(|| {
+            entries
+                .iter()
+                .find(|e| base_name(&e.name).eq_ignore_ascii_case(name))
+        })
+}
+
+/// Find the entry for a file. `candidates` are the names the file goes by,
+/// MOST TRUSTED FIRST: the last segment of the link the user typed, then of
+/// the redirect target, then the name supplied by the server. The first one
+/// found in the list wins, but if two candidates name entries with different
+/// hashes the result is a [`Lookup::Conflict`] — a server must not be able to
+/// pick which listed file it is checked against.
+/// A list with a single entry and no name (e.g. `file.iso.sha256` holding
+/// only the hash) matches that single entry.
+pub fn find<'a>(entries: &'a [Entry], candidates: &[String]) -> Lookup<'a> {
+    let mut first: Option<&Entry> = None;
+    let mut matched: Vec<(String, &Entry)> = Vec::new();
+    for c in candidates
         .iter()
         .map(|c| c.trim())
         .filter(|c| !c.is_empty())
-        .collect();
-    let exact = entries
-        .iter()
-        .find(|e| wanted.iter().any(|w| base_name(&e.name) == *w));
-    if exact.is_some() {
-        return exact;
+    {
+        if let Some(e) = entry_for(entries, c) {
+            first.get_or_insert(e);
+            matched.push((c.to_string(), e));
+        }
     }
-    let ci = entries.iter().find(|e| {
-        wanted
-            .iter()
-            .any(|w| base_name(&e.name).eq_ignore_ascii_case(w))
-    });
-    if ci.is_some() {
-        return ci;
+    if let Some(f) = first {
+        if matched.iter().any(|(_, e)| e.sha256 != f.sha256) {
+            let mut names: Vec<String> = matched.into_iter().map(|(n, _)| n).collect();
+            names.dedup();
+            return Lookup::Conflict(names);
+        }
+        return Lookup::Found(f);
     }
     match entries {
-        [only] if only.name.is_empty() => Some(only),
-        _ => None,
+        [only] if only.name.is_empty() => Lookup::Found(only),
+        _ => Lookup::NotListed,
     }
 }
 
@@ -127,6 +157,33 @@ mod tests {
         c.iter().map(|s| s.to_string()).collect()
     }
 
+    fn found<'a>(e: &'a [Entry], c: &[&str]) -> &'a Entry {
+        match find(e, &names(c)) {
+            Lookup::Found(x) => x,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_cannot_choose_another_listed_file() {
+        // The link asks for distro.iso; the server calls its content tool.zip,
+        // another file of the same list with a different hash.
+        let e = parse(&format!("{A}  distro.iso\n{B}  tool.zip\n"));
+        assert!(matches!(
+            find(&e, &names(&["distro.iso", "tool.zip"])),
+            Lookup::Conflict(n) if n == vec!["distro.iso".to_string(), "tool.zip".to_string()]
+        ));
+        // Same hash under two names: no conflict; the link's name wins.
+        let e = parse(&format!("{A}  distro.iso\n{A}  distro-latest.iso\n"));
+        assert_eq!(
+            found(&e, &["distro.iso", "distro-latest.iso"]).name,
+            "distro.iso"
+        );
+        // Unknown link name (e.g. /download?id=3): the server name is used.
+        let e = parse(&format!("{A}  distro.iso\n{B}  tool.zip\n"));
+        assert_eq!(found(&e, &["download", "distro.iso"]).name, "distro.iso");
+    }
+
     #[test]
     fn gnu_and_bsd_formats() {
         let text = format!(
@@ -134,33 +191,28 @@ mod tests {
         );
         let e = parse(&text);
         assert_eq!(e.len(), 3);
+        assert_eq!(found(&e, &["tool.zip"]).sha256, B.to_ascii_lowercase());
+        assert_eq!(found(&e, &["debian.iso"]).sha256, A);
         assert_eq!(
-            find(&e, &names(&["tool.zip"])).unwrap().sha256,
-            B.to_ascii_lowercase()
-        );
-        assert_eq!(find(&e, &names(&["debian.iso"])).unwrap().sha256, A);
-        assert_eq!(
-            find(&e, &names(&["x", "ubuntu-24.04-desktop-amd64.iso"]))
-                .unwrap()
-                .name,
+            found(&e, &["x", "ubuntu-24.04-desktop-amd64.iso"]).name,
             "ubuntu-24.04-desktop-amd64.iso"
         );
-        assert!(find(&e, &names(&["other.iso"])).is_none());
+        assert_eq!(find(&e, &names(&["other.iso"])), Lookup::NotListed);
     }
 
     #[test]
     fn single_hash_file() {
         let e = parse(&format!("{A}\n"));
-        assert_eq!(find(&e, &names(&["whatever.iso"])).unwrap().sha256, A);
+        assert_eq!(found(&e, &["whatever.iso"]).sha256, A);
         // A single entry WITH a different name does not match.
         let e = parse(&format!("{A}  other.iso\n"));
-        assert!(find(&e, &names(&["whatever.iso"])).is_none());
+        assert_eq!(find(&e, &names(&["whatever.iso"])), Lookup::NotListed);
     }
 
     #[test]
     fn names_with_spaces_and_case() {
         let e = parse(&format!("{A}  My File (1).ISO\n"));
-        assert!(find(&e, &names(&["My File (1).ISO"])).is_some());
-        assert!(find(&e, &names(&["my file (1).iso"])).is_some());
+        found(&e, &["My File (1).ISO"]);
+        found(&e, &["my file (1).iso"]);
     }
 }

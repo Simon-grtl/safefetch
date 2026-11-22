@@ -328,3 +328,43 @@ async fn recheck_needs_an_api_key() {
     let e = env(EnvOptions::default());
     assert!(e.engine.recheck_now().await.is_err());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn server_cannot_pass_off_another_listed_file() {
+    require_clamav!();
+    // The user asks for distro-1.0.iso; the server serves the bytes of another
+    // legitimately listed file and names it so via Content-Disposition.
+    let other = b"the publisher's other, older file".to_vec();
+    let sums = format!(
+        "{}  distro-1.0.iso\n{}  distro-0.9.iso\n",
+        sha256_bytes(ISO),
+        sha256_bytes(&other)
+    );
+    let srv = RawServer::start(static_server(vec![
+        (
+            "/pub/distro-1.0.iso",
+            other,
+            vec![(
+                "Content-Disposition",
+                "attachment; filename=\"distro-0.9.iso\"",
+            )],
+        ),
+        ("/pub/SHA256SUMS", sums.into_bytes(), vec![]),
+    ]))
+    .await;
+    let e = env(EnvOptions::default());
+    let j = e
+        .run(&format!(
+            "{} {}",
+            srv.url("/pub/distro-1.0.iso"),
+            srv.url("/pub/SHA256SUMS")
+        ))
+        .await;
+    let v = j.verdict.unwrap();
+    assert_eq!(v.level, VerdictLevel::Suspect, "{:?}", v.reasons);
+    assert!(matches!(
+        v.report.checksum_list,
+        Some(ChecksumListResult::Conflict { .. })
+    ));
+    assert!(e.dest_files().is_empty());
+}

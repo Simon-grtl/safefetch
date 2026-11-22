@@ -219,6 +219,14 @@ pub fn decide(report: ScanReport, t: Thresholds) -> Verdict {
             ));
             None
         }
+        Some(ChecksumListResult::Conflict { source, names }) => {
+            raise(VerdictLevel::Suspect, &mut level);
+            reasons.push(format!(
+                "The names this file goes by ({}) match different entries of the publisher's checksum list ({source}): it cannot be verified",
+                names.join(", ")
+            ));
+            None
+        }
         Some(ChecksumListResult::Unavailable { source, error }) => {
             raise(VerdictLevel::NotAnalyzed, &mut level);
             reasons.push(format!(

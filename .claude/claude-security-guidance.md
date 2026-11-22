@@ -16,7 +16,7 @@ Review every change against these rules. Any violation is a blocker.
 8. When the user typed a public URL, DNS goes through `PublicOnlyResolver`.
 9. Announced size (Content-Length / Content-Range) is enforced against bytes received; max size and free disk space are checked before and during the download.
 10. URLs shown or logged go through `net::display_url` (no query string, no userinfo).
-10b. Publisher checksum lists are fetched with the same client/redirect rules as downloads (`download::open`), capped at `checksums::MAX_LIST_SIZE`, kept in memory only. A list that cannot be read ⇒ Not analyzed; a file absent from it ⇒ Suspect.
+10b. Publisher checksum lists are fetched with the same client/redirect rules as downloads (`download::open`), capped at `checksums::MAX_LIST_SIZE` and `FETCH_DEADLINE_SECS` overall, fetched before taking the scan lock, kept in memory only. Names are tried most-trusted first (typed link, redirect target, server name); names matching entries with different hashes ⇒ Suspect (`Conflict`), so a server cannot choose which listed file it is checked against. A list that cannot be read ⇒ Not analyzed; a file absent from it ⇒ Suspect.
 
 ## Verdict
 11. A file is **Clean** only if at least one local engine completed AND no engine/VirusTotal signal says otherwise (`verdict::decide`). Any limit, truncation, encryption, error or missing engine ⇒ Not analyzed.
