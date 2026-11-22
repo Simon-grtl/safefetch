@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/safefetch-core", "src-tauri"]
+members = ["crates/safefetch-core", "src-tauri", "xtask"]
 
 [workspace.package]
 version = "0.1.0"

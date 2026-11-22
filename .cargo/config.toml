@@ -1,0 +1,5 @@
+# Maintainer shortcuts (see xtask/src/main.rs).
+#   cargo bump 0.2.0          set the version in every file at once
+#   cargo bump --check 0.2.0  verify (used by the release workflow)
+[alias]
+bump = "run --quiet --package xtask -- bump"
